@@ -5,7 +5,8 @@ import dns.resolver
 import requests
 import json
 import sys
-from typing import Optional, Dict
+import csv
+from typing import Optional, Dict, List
 
 # Disable SSL verification warnings
 import urllib3
@@ -98,47 +99,81 @@ def verify_dns(ip: str, fqdn: str) -> bool:
         print("Error during DNS resolution: %s" % str(e))
         return False
 
-def main():
-    parser = argparse.ArgumentParser(description='Update server owner in iTop after DNS verification')
-    parser.add_argument('--ip', required=True, help='Server IP address')
-    parser.add_argument('--fqdn', required=True, help='Server FQDN')
-    parser.add_argument('--owner', required=True, help='New owner information')
-    parser.add_argument('--itop-url', required=True, help='iTop URL')
-    parser.add_argument('--itop-user', required=True, help='iTop username')
-    parser.add_argument('--itop-password', required=True, help='iTop password')
-    
-    args = parser.parse_args()
-
+def process_machine(itop: ITopAPI, ip: str, fqdn: str, owner: str, description: str) -> bool:
+    """Process a single machine update"""
     # First verify DNS
-    if not verify_dns(args.ip, args.fqdn):
-        print("Error: DNS verification failed. IP %s does not match DNS records for %s" % (args.ip, args.fqdn))
-        sys.exit(1)
-
-    # Initialize iTop API client
-    itop = ITopAPI(args.itop_url, args.itop_user, args.itop_password)
+    if not verify_dns(ip, fqdn):
+        print(f"Error: DNS verification failed. IP {ip} does not match DNS records for {fqdn}")
+        return False
 
     # Search in both Server and VirtualMachine classes
-    server = itop.search_object('Server', 'ip_address', args.ip)
-    vm = itop.search_object('VirtualMachine', 'ip_address', args.ip)
+    server = itop.search_object('Server', 'managementip', ip)
+    vm = itop.search_object('VirtualMachine', 'managementip', ip)
 
     target_object = server or vm
     if not target_object:
-        print("Error: No machine found with IP %s in iTop" % args.ip)
-        sys.exit(1)
+        print(f"Error: No machine found with IP {ip} in iTop")
+        return False
 
     # Update the owner information
     class_name = 'Server' if server else 'VirtualMachine'
     object_id = target_object['key']
     
     update_data = {
-        'ownerorg': args.owner
+        'ownerorg': owner,
+        'description': description
     }
 
     if itop.update_object(class_name, object_id, update_data):
-        print("Successfully updated owner information for %s" % args.fqdn)
+        print(f"Successfully updated information for {fqdn}")
+        return True
     else:
-        print("Error: Failed to update owner information in iTop")
+        print(f"Error: Failed to update information in iTop for {fqdn}")
+        return False
+
+def read_csv_file(file_path: str) -> List[Dict]:
+    """Read the CSV file and return list of machine records"""
+    machines = []
+    try:
+        with open(file_path, 'r') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                # Verify required fields
+                required_fields = ['IP', 'Name', 'Owner', 'Description']
+                if not all(field in row for field in required_fields):
+                    print(f"Error: CSV must contain columns: {', '.join(required_fields)}")
+                    sys.exit(1)
+                machines.append(row)
+    except Exception as e:
+        print(f"Error reading CSV file: {str(e)}")
         sys.exit(1)
+    return machines
+
+def main():
+    parser = argparse.ArgumentParser(description='Update server information in iTop from CSV file')
+    parser.add_argument('--csv-file', required=True, help='Path to CSV file containing machine information')
+    parser.add_argument('--itop-url', required=True, help='iTop URL')
+    parser.add_argument('--itop-user', required=True, help='iTop username')
+    parser.add_argument('--itop-password', required=True, help='iTop password')
+    
+    args = parser.parse_args()
+
+    # Initialize iTop API client
+    itop = ITopAPI(args.itop_url, args.itop_user, args.itop_password)
+
+    # Read and process machines from CSV
+    machines = read_csv_file(args.csv_file)
+    
+    success_count = 0
+    total_count = len(machines)
+    
+    print(f"\nProcessing {total_count} machines...\n")
+    
+    for machine in machines:
+        if process_machine(itop, machine['IP'], machine['Name'], machine['Owner'], machine['Description']):
+            success_count += 1
+    
+    print(f"\nCompleted: Successfully updated {success_count} out of {total_count} machines")
 
 if __name__ == "__main__":
     main()

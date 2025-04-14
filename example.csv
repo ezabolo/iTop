@@ -1,0 +1,4 @@
+IP,Name,Owner,Description
+192.168.1.100,server1.example.com,IT Department,Primary application server
+192.168.1.101,server2.example.com,HR Department,HR database server
+192.168.1.102,vm1.example.com,Finance Department,Finance application VM
