@@ -58,7 +58,8 @@ class ITopAPI:
             'operation': 'core/update',
             'class': class_name,
             'key': object_id,
-            'fields': data
+            'fields': data,
+            'comment': 'Updated owner information via automation script'
         }
         
         print(f"\nUpdating {class_name} with ID {object_id}")
