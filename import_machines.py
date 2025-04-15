@@ -60,124 +60,41 @@ class ITopAPI:
             print(f"Error searching for {class_name}: {str(e)}")
             return None
 
-    def list_available_os_families(self) -> Dict[str, str]:
-        """Get all available OS families from iTop"""
-        query = {
-            'operation': 'core/get',
-            'class': 'OSFamily',
-            'key': "SELECT OSFamily",
-            'output_fields': 'id, name'
-        }
 
+    def get_first_id_from_query(self, query: str) -> Optional[str]:
+        """Execute a query and return the first ID from the results"""
         try:
             response = self.session.post(
                 f"{self.url}/webservices/rest.php?version=1.3",
                 auth=self.auth,
-                data={'json_data': json.dumps(query)}
+                data={'json_data': json.dumps({
+                    'operation': 'core/get',
+                    'key': query,
+                    'output_fields': 'id'
+                })}
             )
             response.raise_for_status()
             result = response.json()
 
-            os_families = {}
-            if 'objects' in result:
-                for os in result['objects'].values():
-                    os_families[os['fields']['name'].lower()] = os['key']
-                print("Available OS Families in iTop:", list(os_families.keys()))
-                return os_families
-            return {}
+            if 'objects' in result and result['objects']:
+                # Get the first object's key (ID)
+                first_id = next(iter(result['objects'].values()))['key']
+                if len(result['objects']) > 1:
+                    print(f"Note: Multiple results found for query '{query}', using first ID: {first_id}")
+                return first_id
+            return None
 
         except Exception as e:
-            print(f"Error querying OS families: {str(e)}")
-            return {}
-
-    def get_os_family_id(self, os_name: str) -> Optional[str]:
-        """Get OS family ID from iTop"""
-        os_families = self.list_available_os_families()
-        os_name_lower = os_name.lower()
-
-        # Try exact match first
-        if os_name_lower in os_families:
-            return os_families[os_name_lower]
-
-        # If no exact match, try partial match
-        for name, id in os_families.items():
-            if os_name_lower in name or name in os_name_lower:
-                print(f"Note: Using OS family '{name}' for '{os_name}'")
-                return id
-
-        print(f"Warning: OS family '{os_name}' not found in iTop. Available options: {list(os_families.keys())}")
-        return None
-
-    def list_available_os_versions(self) -> Dict[str, str]:
-        """Get all available OS versions from iTop"""
-        query = {
-            'operation': 'core/get',
-            'class': 'OSVersion',
-            'key': "SELECT OSVersion",
-            'output_fields': 'id, name'
-        }
-
-        try:
-            response = self.session.post(
-                f"{self.url}/webservices/rest.php?version=1.3",
-                auth=self.auth,
-                data={'json_data': json.dumps(query)}
-            )
-            response.raise_for_status()
-            result = response.json()
-
-            os_versions = {}
-            if 'objects' in result:
-                for os in result['objects'].values():
-                    os_versions[os['fields']['name'].lower()] = os['key']
-                print("Available OS Versions in iTop:", list(os_versions.keys()))
-                return os_versions
-            return {}
-
-        except Exception as e:
-            print(f"Error querying OS versions: {str(e)}")
-            return {}
-
-    def get_os_version_id(self, os_version: str) -> Optional[str]:
-        """Get OS version ID from iTop, taking first if multiple exist"""
-        os_versions = self.list_available_os_versions()
-        os_version_lower = os_version.lower()
-
-        # Try exact match first
-        if os_version_lower in os_versions:
-            return os_versions[os_version_lower]
-
-        # If no exact match, try partial match
-        matching_versions = []
-        for name, id in os_versions.items():
-            if os_version_lower in name or name in os_version_lower:
-                matching_versions.append((name, id))
-
-        if matching_versions:
-            # Use the first matching version
-            name, id = matching_versions[0]
-            if len(matching_versions) > 1:
-                print(f"Note: Multiple matches found for OS version '{os_version}', using '{name}'")
-            else:
-                print(f"Note: Using OS version '{name}' for '{os_version}'")
-            return id
-
-        print(f"Warning: OS version '{os_version}' not found in iTop. Available options: {list(os_versions.keys())}")
-        return None
+            print(f"Error executing query: {str(e)}")
+            return None
 
     def create_machine(self, data: Dict, machine_class: str) -> bool:
         """Create a new machine in iTop"""
-        # Get OS family and version IDs
-        os_family_id = self.get_os_family_id(data.pop('os_name'))
-        os_version_id = self.get_os_version_id(data.pop('os_version'))
-
-        if not os_family_id or not os_version_id:
-            print(f"Error: Could not find OS information for {data['name']}")
-            return False
-
-        # Update data with resolved OS IDs
-        data['osfamily_id'] = os_family_id
-        data['osversion_id'] = os_version_id
+        # Handle OS version ID if it's a SELECT query
+        if isinstance(data.get('osversion_id'), str) and data['osversion_id'].startswith('SELECT'):
+            version_id = self.get_first_id_from_query(data['osversion_id'])
+            if version_id:
+                data['osversion_id'] = version_id
 
         payload = {
             'operation': 'core/create',
@@ -272,8 +189,8 @@ def process_csv_file(csv_path: str, itop: ITopAPI):
                     'name': fqdn,
                     'managementip': ip,
                     'org_id': f"SELECT Organization WHERE name = '{org}'",
-                    'os_name': row['OS_Name'],  # Will be resolved to ID in create_machine
-                    'os_version': row['OS_Version'],  # Will be resolved to ID in create_machine
+                    'osfamily_id': f"SELECT OSFamily WHERE name = '{row['OS_Name']}'",
+                    'osversion_id': f"SELECT OSVersion WHERE name = '{row['OS_Version']}'",
                     'cpu': row['CPU'],
                     'ram': row['Memory'],
                     'diskspace': convert_storage_to_mb(row['Provisioned Storage'])
