@@ -178,27 +178,27 @@ def process_csv_file(csv_path: str, itop: ITopAPI):
                 existing = itop.search_machine(ip, fqdn)
                 if existing:
                     print(f"Machine already exists: {fqdn} ({ip})")
-                    continue
+                else:
+                    # Only create if machine doesn't exist
+                    # Determine organization and machine class
+                    org = determine_organization(fqdn)
+                    machine_class = determine_machine_class(org)
 
-                # Determine organization and machine class
-                org = determine_organization(fqdn)
-                machine_class = determine_machine_class(org)
+                    # Prepare machine data
+                    machine_data = {
+                        'name': fqdn,
+                        'managementip': ip,
+                        'org_id': f"SELECT Organization WHERE name = '{org}'",
+                        'osfamily_id': f"SELECT OSFamily WHERE name = '{row['OS_Name']}'",
+                        'osversion_id': f"SELECT OSVersion WHERE name = '{row['OS_Version']}'",
+                        'cpu': row['CPU'],
+                        'ram': row['Memory'],
+                        'diskspace': convert_storage_to_mb(row['Provisioned Storage'])
+                    }
 
-                # Prepare machine data
-                machine_data = {
-                    'name': fqdn,
-                    'managementip': ip,
-                    'org_id': f"SELECT Organization WHERE name = '{org}'",
-                    'osfamily_id': f"SELECT OSFamily WHERE name = '{row['OS_Name']}'",
-                    'osversion_id': f"SELECT OSVersion WHERE name = '{row['OS_Version']}'",
-                    'cpu': row['CPU'],
-                    'ram': row['Memory'],
-                    'diskspace': convert_storage_to_mb(row['Provisioned Storage'])
-                }
-
-                # Create the machine
-                print(f"\nCreating {machine_class}: {fqdn}")
-                itop.create_machine(machine_data, machine_class)
+                    # Create the machine
+                    print(f"\nCreating {machine_class}: {fqdn}")
+                    itop.create_machine(machine_data, machine_class)
 
     except FileNotFoundError:
         print(f"Error: File not found: {csv_path}")
