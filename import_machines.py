@@ -60,12 +60,12 @@ class ITopAPI:
             print(f"Error searching for {class_name}: {str(e)}")
             return None
 
-    def get_os_family_id(self, os_name: str) -> Optional[str]:
-        """Get OS family ID from iTop"""
+    def list_available_os_families(self) -> Dict[str, str]:
+        """Get all available OS families from iTop"""
         query = {
             'operation': 'core/get',
             'class': 'OSFamily',
-            'key': f"SELECT OSFamily WHERE name = '{os_name}'",
+            'key': "SELECT OSFamily",
             'output_fields': 'id, name'
         }
 
@@ -78,23 +78,42 @@ class ITopAPI:
             response.raise_for_status()
             result = response.json()
 
-            if 'objects' in result and result['objects']:
-                # Get the first OS family ID
-                first_os = next(iter(result['objects'].values()))
-                return first_os['key']
-            print(f"Warning: OS family '{os_name}' not found in iTop")
-            return None
+            os_families = {}
+            if 'objects' in result:
+                for os in result['objects'].values():
+                    os_families[os['fields']['name'].lower()] = os['key']
+                print("Available OS Families in iTop:", list(os_families.keys()))
+                return os_families
+            return {}
 
         except Exception as e:
-            print(f"Error querying OS family: {str(e)}")
-            return None
+            print(f"Error querying OS families: {str(e)}")
+            return {}
 
-    def get_os_version_id(self, os_version: str) -> Optional[str]:
-        """Get OS version ID from iTop, taking first if multiple exist"""
+    def get_os_family_id(self, os_name: str) -> Optional[str]:
+        """Get OS family ID from iTop"""
+        os_families = self.list_available_os_families()
+        os_name_lower = os_name.lower()
+
+        # Try exact match first
+        if os_name_lower in os_families:
+            return os_families[os_name_lower]
+
+        # If no exact match, try partial match
+        for name, id in os_families.items():
+            if os_name_lower in name or name in os_name_lower:
+                print(f"Note: Using OS family '{name}' for '{os_name}'")
+                return id
+
+        print(f"Warning: OS family '{os_name}' not found in iTop. Available options: {list(os_families.keys())}")
+        return None
+
+    def list_available_os_versions(self) -> Dict[str, str]:
+        """Get all available OS versions from iTop"""
         query = {
             'operation': 'core/get',
             'class': 'OSVersion',
-            'key': f"SELECT OSVersion WHERE name = '{os_version}'",
+            'key': "SELECT OSVersion",
             'output_fields': 'id, name'
         }
 
@@ -107,19 +126,44 @@ class ITopAPI:
             response.raise_for_status()
             result = response.json()
 
-            if 'objects' in result and result['objects']:
-                # Get the first OS version ID from potentially multiple results
-                first_os = next(iter(result['objects'].values()))
-                version_id = first_os['key']
-                if len(result['objects']) > 1:
-                    print(f"Note: Multiple IDs found for OS version '{os_version}', using first ID: {version_id}")
-                return version_id
-            print(f"Warning: OS version '{os_version}' not found in iTop")
-            return None
+            os_versions = {}
+            if 'objects' in result:
+                for os in result['objects'].values():
+                    os_versions[os['fields']['name'].lower()] = os['key']
+                print("Available OS Versions in iTop:", list(os_versions.keys()))
+                return os_versions
+            return {}
 
         except Exception as e:
-            print(f"Error querying OS version: {str(e)}")
-            return None
+            print(f"Error querying OS versions: {str(e)}")
+            return {}
+
+    def get_os_version_id(self, os_version: str) -> Optional[str]:
+        """Get OS version ID from iTop, taking first if multiple exist"""
+        os_versions = self.list_available_os_versions()
+        os_version_lower = os_version.lower()
+
+        # Try exact match first
+        if os_version_lower in os_versions:
+            return os_versions[os_version_lower]
+
+        # If no exact match, try partial match
+        matching_versions = []
+        for name, id in os_versions.items():
+            if os_version_lower in name or name in os_version_lower:
+                matching_versions.append((name, id))
+
+        if matching_versions:
+            # Use the first matching version
+            name, id = matching_versions[0]
+            if len(matching_versions) > 1:
+                print(f"Note: Multiple matches found for OS version '{os_version}', using '{name}'")
+            else:
+                print(f"Note: Using OS version '{name}' for '{os_version}'")
+            return id
+
+        print(f"Warning: OS version '{os_version}' not found in iTop. Available options: {list(os_versions.keys())}")
+        return None
 
     def create_machine(self, data: Dict, machine_class: str) -> bool:
         """Create a new machine in iTop"""
