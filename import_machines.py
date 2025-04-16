@@ -4,6 +4,7 @@ import csv
 import json
 import requests
 import sys
+import traceback
 from typing import Dict, Optional
 from urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
@@ -11,9 +12,49 @@ requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 class ITopAPI:
     def __init__(self, url: str, user: str, password: str):
         self.url = url
+        # Remove trailing slashes from URL
+        if self.url.endswith('/'):
+            self.url = self.url[:-1]
+            
         self.auth = (user, password)
         self.session = requests.Session()
         self.session.verify = False
+        
+        # Test connection immediately
+        self.connection_valid = self._test_connection()
+        if not self.connection_valid:
+            print(f"WARNING: Failed to authenticate with iTop API. Please check credentials for user: {user}")
+    
+    def _test_connection(self) -> bool:
+        """Test the iTop connection with basic ping"""
+        test_query = {
+            'operation': 'core/check_credentials',
+            'user': self.auth[0],
+            'password': self.auth[1]
+        }
+        
+        try:
+            response = self.session.post(
+                f"{self.url}/webservices/rest.php?version=1.3",
+                headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                data={'json_data': json.dumps(test_query)},
+                verify=False
+            )
+            
+            if response.status_code != 200:
+                print(f"Connection test failed with status code: {response.status_code}")
+                return False
+                
+            result = response.json()
+            if result.get('code') != 0:
+                print(f"Authentication failed: {result.get('message', 'Unknown error')}")
+                return False
+                
+            return True
+            
+        except Exception as e:
+            print(f"Connection test failed with error: {str(e)}")
+            return False
 
     def search_machine(self, ip: str, fqdn: str) -> Optional[Dict]:
         """Search for a machine in iTop by IP and FQDN"""
@@ -65,6 +106,18 @@ class ITopAPI:
                 if not isinstance(result, dict):
                     print("Error: Invalid response format")
                     return None
+                
+                # Check for specific error patterns
+                if 'code' in result and result.get('code') != 0:
+                    error_message = result.get('message', 'Unknown error')
+                    print(f"API Error {result.get('code')}: {error_message}")
+                    
+                    # Handle auth errors specifically
+                    if 'Invalid login' in error_message or result.get('code') == 3:
+                        print("Authentication failed - please check your credentials")
+                        # Mark connection as invalid so we don't keep trying
+                        self.connection_valid = False
+                    return None
                     
                 if 'objects' in result and result['objects']:
                     if not isinstance(result['objects'], dict):
@@ -74,8 +127,10 @@ class ITopAPI:
                 
                 if 'message' in result:
                     print(f"API Error: {result['message']}")
+                elif response.status_code == 200:
+                    print("Request successful but no objects found")
                 else:
-                    print("No matching objects found")
+                    print(f"Unexpected response: {response.status_code}")
                 
             except json.JSONDecodeError:
                 print(f"Invalid JSON response: {response.text[:200]}")
@@ -215,13 +270,28 @@ def check_or_create_os_family(itop: ITopAPI, os_name: str) -> Optional[str]:
         response = itop.session.post(
             f"{itop.url}/webservices/rest.php?version=1.3",
             auth=itop.auth,
-            data={'json_data': json.dumps(payload)}
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            data={'json_data': json.dumps(payload)},
+            verify=False
         )
+        
+        print(f"Creation Status: {response.status_code}")
+        print(f"Response: {response.text[:200]}")
+        
         response.raise_for_status()
         result = response.json()
-        return result.get('objects', {}).get('key', None)
+        
+        if result.get('code') == 0:  # Success code
+            created_id = list(result.get('objects', {}).keys())[0]
+            print(f"Successfully created OS Family with ID: {created_id}")
+            return created_id
+        else:
+            print(f"Creation failed: {result.get('message', 'Unknown error')}")
+            return None
+            
     except Exception as e:
         print(f"Error creating OS Family {os_name}: {str(e)}")
+        print(f"Full error: {traceback.format_exc()}")
         return None
 
 def determine_organization(fqdn: str) -> str:
@@ -330,6 +400,15 @@ def main():
 
     # Initialize iTop API client
     itop = ITopAPI(args.itop_url, args.itop_user, args.itop_password)
+    
+    # Verify authentication before continuing
+    if not itop.connection_valid:
+        print("\nERROR: Failed to authenticate with iTop API.")
+        print(f"Please verify your credentials for user: {args.itop_user}")
+        print(f"URL: {args.itop_url}")
+        sys.exit(1)
+        
+    print(f"\nAuthentication successful. Connected to iTop as {args.itop_user}")
 
     # Process the CSV file
     process_csv_file(args.csv_file, itop)
