@@ -41,21 +41,34 @@ class ITopAPI:
             'key': f"SELECT {class_name} WHERE {field} = '{value}'",
             'output_fields': '*'
         }
-
+        
+        print(f"\nSearching for {class_name} with {field}={value}")
+        print("Query:", query)
+        
+        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
         try:
             response = self.session.post(
                 f"{self.url}/webservices/rest.php?version=1.3",
                 auth=self.auth,
-                data={'json_data': json.dumps(query)}
+                headers=headers,
+                data={'json_data': json.dumps(query)},
+                verify=False
             )
-            response.raise_for_status()
+            
+            print("Response Status:", response.status_code)
             result = response.json()
-
+            print("Response:", json.dumps(result, indent=2))
+            
+            response.raise_for_status()
+            
             if 'objects' in result and result['objects']:
-                # Return the first matching object
                 return next(iter(result['objects'].values()))
+            elif 'message' in result:
+                print("API Error Message:", result['message'])
+            else:
+                print("No objects found in response")
             return None
-
+            
         except Exception as e:
             print(f"Error searching for {class_name}: {str(e)}")
             return None
@@ -82,6 +95,31 @@ class ITopAPI:
                 if len(result['objects']) > 1:
                     print(f"Note: Multiple results found for query '{query}', using first ID: {first_id}")
                 return first_id
+            return None
+
+        except Exception as e:
+            print(f"Error executing query: {str(e)}")
+            return None
+
+    def get_lowest_id_from_query(self, query: str) -> Optional[str]:
+        """Execute query and return the lowest ID from results"""
+        try:
+            response = self.session.post(
+                f"{self.url}/webservices/rest.php?version=1.3",
+                auth=self.auth,
+                data={'json_data': json.dumps({
+                    'operation': 'core/get',
+                    'key': query,
+                    'output_fields': 'id'
+                })}
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            if 'objects' in result and result['objects']:
+                # Get all IDs and return the lowest one
+                ids = [obj['key'] for obj in result['objects'].values()]
+                return min(ids)
             return None
 
         except Exception as e:
@@ -123,6 +161,56 @@ class ITopAPI:
         except Exception as e:
             print(f"Error creating {machine_class}: {str(e)}")
             return False
+
+def check_os_exists(itop: ITopAPI, os_name: str, os_version: str) -> bool:
+    """Check if both OS Family and Version exist"""
+    os_family = itop.get_first_id_from_query(
+        f"SELECT OSFamily WHERE name = '{os_name}'"
+    )
+    if not os_family:
+        print(f"OS Family not found: {os_name}")
+        return False
+        
+    os_ver = itop.get_first_id_from_query(
+        f"SELECT OSVersion WHERE name = '{os_version}'"
+    )
+    if not os_ver:
+        print(f"OS Version not found: {os_version}")
+        return False
+        
+    return True
+
+def check_or_create_os_family(itop: ITopAPI, os_name: str) -> Optional[str]:
+    """Check if OS Family exists, create it if not"""
+    # First try to find existing OS Family
+    existing = itop.get_first_id_from_query(
+        f"SELECT OSFamily WHERE name = '{os_name}'"
+    )
+    if existing:
+        return existing
+    
+    # If not found, create it
+    print(f"Creating new OS Family: {os_name}")
+    payload = {
+        'operation': 'core/create',
+        'class': 'OSFamily',
+        'fields': {'name': os_name},
+        'comment': 'Created via import script',
+        'output_fields': 'id'
+    }
+    
+    try:
+        response = itop.session.post(
+            f"{itop.url}/webservices/rest.php?version=1.3",
+            auth=itop.auth,
+            data={'json_data': json.dumps(payload)}
+        )
+        response.raise_for_status()
+        result = response.json()
+        return result.get('objects', {}).get('key', None)
+    except Exception as e:
+        print(f"Error creating OS Family {os_name}: {str(e)}")
+        return None
 
 def determine_organization(fqdn: str) -> str:
     """Determine organization based on FQDN"""
@@ -184,13 +272,25 @@ def process_csv_file(csv_path: str, itop: ITopAPI):
                     org = determine_organization(fqdn)
                     machine_class = determine_machine_class(org)
 
+                    # Get OS IDs (lowest if multiple)
+                    os_family_id = itop.get_lowest_id_from_query(
+                        f"SELECT OSFamily WHERE name = '{row['OS_Name']}'"
+                    )
+                    os_version_id = itop.get_lowest_id_from_query(
+                        f"SELECT OSVersion WHERE name = '{row['OS_Version']}'"
+                    )
+                    
+                    if not os_family_id or not os_version_id:
+                        print(f"Skipping {fqdn} - OS not found")
+                        continue
+                        
                     # Prepare machine data
                     machine_data = {
                         'name': fqdn,
                         'managementip': ip,
                         'org_id': f"SELECT Organization WHERE name = '{org}'",
-                        'osfamily_id': f"SELECT OSFamily WHERE name = '{row['OS_Name']}'",
-                        'osversion_id': f"SELECT OSVersion WHERE name = '{row['OS_Version']}'",
+                        'osfamily_id': os_family_id,
+                        'osversion_id': os_version_id,
                         'cpu': row['CPU'],
                         'ram': row['Memory'],
                         'diskspace': convert_storage_to_mb(row['Provisioned Storage'])
