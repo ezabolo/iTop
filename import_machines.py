@@ -34,7 +34,7 @@ class ITopAPI:
         return None
 
     def search_object(self, class_name: str, field: str, value: str) -> Optional[Dict]:
-        """Search for an object in iTop"""
+        """Search for an object in iTop with enhanced validation"""
         query = {
             'operation': 'core/get',
             'class': class_name,
@@ -43,7 +43,7 @@ class ITopAPI:
         }
         
         print(f"\nSearching for {class_name} with {field}={value}")
-        print("Query:", query)
+        print("Query:", json.dumps(query, indent=2))
         
         headers = {'Content-Type': 'application/x-www-form-urlencoded'}
         try:
@@ -55,24 +55,36 @@ class ITopAPI:
                 verify=False
             )
             
-            print("Response Status:", response.status_code)
-            result = response.json()
-            print("Response:", json.dumps(result, indent=2))
+            print(f"Response Status: {response.status_code}")
             
-            response.raise_for_status()
-            
-            if 'objects' in result and result['objects']:
-                return next(iter(result['objects'].values()))
-            elif 'message' in result:
-                print("API Error Message:", result['message'])
-            else:
-                print("No objects found in response")
+            # Validate response structure
+            try:
+                result = response.json()
+                print("Response:", json.dumps(result, indent=2))
+                
+                if not isinstance(result, dict):
+                    print("Error: Invalid response format")
+                    return None
+                    
+                if 'objects' in result and result['objects']:
+                    if not isinstance(result['objects'], dict):
+                        print("Error: Objects should be a dictionary")
+                        return None
+                    return next(iter(result['objects'].values()))
+                
+                if 'message' in result:
+                    print(f"API Error: {result['message']}")
+                else:
+                    print("No matching objects found")
+                
+            except json.JSONDecodeError:
+                print(f"Invalid JSON response: {response.text[:200]}")
+                
             return None
             
-        except Exception as e:
-            print(f"Error searching for {class_name}: {str(e)}")
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {str(e)}")
             return None
-
 
     def get_first_id_from_query(self, query: str) -> Optional[str]:
         """Execute a query and return the first ID from the results"""
