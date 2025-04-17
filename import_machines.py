@@ -16,45 +16,9 @@ class ITopAPI:
         if self.url.endswith('/'):
             self.url = self.url[:-1]
             
+        self.username = user
+        self.password = password
         self.auth = (user, password)
-        self.session = requests.Session()
-        self.session.verify = False
-        
-        # Test connection immediately
-        self.connection_valid = self._test_connection()
-        if not self.connection_valid:
-            print(f"WARNING: Failed to authenticate with iTop API. Please check credentials for user: {user}")
-    
-    def _test_connection(self) -> bool:
-        """Test the iTop connection with basic ping"""
-        test_query = {
-            'operation': 'core/check_credentials',
-            'user': self.auth[0],
-            'password': self.auth[1]
-        }
-        
-        try:
-            response = self.session.post(
-                f"{self.url}/webservices/rest.php?version=1.3",
-                headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                data={'json_data': json.dumps(test_query)},
-                verify=False
-            )
-            
-            if response.status_code != 200:
-                print(f"Connection test failed with status code: {response.status_code}")
-                return False
-                
-            result = response.json()
-            if result.get('code') != 0:
-                print(f"Authentication failed: {result.get('message', 'Unknown error')}")
-                return False
-                
-            return True
-            
-        except Exception as e:
-            print(f"Connection test failed with error: {str(e)}")
-            return False
 
     def search_machine(self, ip: str, fqdn: str) -> Optional[Dict]:
         """Search for a machine in iTop by IP and FQDN"""
@@ -75,7 +39,7 @@ class ITopAPI:
         return None
 
     def search_object(self, class_name: str, field: str, value: str) -> Optional[Dict]:
-        """Search for an object in iTop with enhanced validation"""
+        """Search for an object in iTop"""
         query = {
             'operation': 'core/get',
             'class': class_name,
@@ -84,114 +48,87 @@ class ITopAPI:
         }
         
         print(f"\nSearching for {class_name} with {field}={value}")
-        print("Query:", json.dumps(query, indent=2))
+        print("Query:", query)
         
         headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-        try:
-            response = self.session.post(
-                f"{self.url}/webservices/rest.php?version=1.3",
-                auth=self.auth,
-                headers=headers,
-                data={'json_data': json.dumps(query)},
-                verify=False
-            )
-            
-            print(f"Response Status: {response.status_code}")
-            
-            # Validate response structure
-            try:
-                result = response.json()
-                print("Response:", json.dumps(result, indent=2))
-                
-                if not isinstance(result, dict):
-                    print("Error: Invalid response format")
-                    return None
-                
-                # Check for specific error patterns
-                if 'code' in result and result.get('code') != 0:
-                    error_message = result.get('message', 'Unknown error')
-                    print(f"API Error {result.get('code')}: {error_message}")
-                    
-                    # Handle auth errors specifically
-                    if 'Invalid login' in error_message or result.get('code') == 3:
-                        print("Authentication failed - please check your credentials")
-                        # Mark connection as invalid so we don't keep trying
-                        self.connection_valid = False
-                    return None
-                    
-                if 'objects' in result and result['objects']:
-                    if not isinstance(result['objects'], dict):
-                        print("Error: Objects should be a dictionary")
-                        return None
-                    return next(iter(result['objects'].values()))
-                
-                if 'message' in result:
-                    print(f"API Error: {result['message']}")
-                elif response.status_code == 200:
-                    print("Request successful but no objects found")
-                else:
-                    print(f"Unexpected response: {response.status_code}")
-                
-            except json.JSONDecodeError:
-                print(f"Invalid JSON response: {response.text[:200]}")
-                
-            return None
-            
-        except requests.exceptions.RequestException as e:
-            print(f"Request failed: {str(e)}")
-            return None
+        response = requests.post(
+            f"{self.url}/webservices/rest.php?version=1.3",
+            auth=self.auth,
+            headers=headers,
+            data={'json_data': json.dumps(query)},
+            verify=False
+        )
+        
+        print("Response Status:", response.status_code)
+        result = response.json()
+        print("Response:", json.dumps(result, indent=2))
+        
+        if response.status_code == 200:
+            if 'objects' in result and result['objects']:
+                return next(iter(result['objects'].values()))
+            elif 'message' in result:
+                print("API Error Message:", result['message'])
+            else:
+                print("No objects found in response")
+        return None
 
     def get_first_id_from_query(self, query: str) -> Optional[str]:
         """Execute a query and return the first ID from the results"""
-        try:
-            response = self.session.post(
-                f"{self.url}/webservices/rest.php?version=1.3",
-                auth=self.auth,
-                data={'json_data': json.dumps({
-                    'operation': 'core/get',
-                    'key': query,
-                    'output_fields': 'id'
-                })}
-            )
-            response.raise_for_status()
+        payload = {
+            'operation': 'core/get',
+            'key': query,
+            'output_fields': 'id'
+        }
+        
+        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+        response = requests.post(
+            f"{self.url}/webservices/rest.php?version=1.3",
+            auth=self.auth,
+            headers=headers,
+            data={'json_data': json.dumps(payload)},
+            verify=False
+        )
+        
+        print(f"Query: {query}")
+        print(f"Response Status: {response.status_code}")
+        
+        if response.status_code == 200:
             result = response.json()
-
             if 'objects' in result and result['objects']:
                 # Get the first object's key (ID)
                 first_id = next(iter(result['objects'].values()))['key']
                 if len(result['objects']) > 1:
                     print(f"Note: Multiple results found for query '{query}', using first ID: {first_id}")
                 return first_id
-            return None
-
-        except Exception as e:
-            print(f"Error executing query: {str(e)}")
-            return None
+        return None
 
     def get_lowest_id_from_query(self, query: str) -> Optional[str]:
         """Execute query and return the lowest ID from results"""
-        try:
-            response = self.session.post(
-                f"{self.url}/webservices/rest.php?version=1.3",
-                auth=self.auth,
-                data={'json_data': json.dumps({
-                    'operation': 'core/get',
-                    'key': query,
-                    'output_fields': 'id'
-                })}
-            )
-            response.raise_for_status()
+        payload = {
+            'operation': 'core/get',
+            'key': query,
+            'output_fields': 'id'
+        }
+        
+        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+        response = requests.post(
+            f"{self.url}/webservices/rest.php?version=1.3",
+            auth=self.auth,
+            headers=headers,
+            data={'json_data': json.dumps(payload)},
+            verify=False
+        )
+        
+        print(f"Query: {query}")
+        print(f"Response Status: {response.status_code}")
+        
+        if response.status_code == 200:
             result = response.json()
-
             if 'objects' in result and result['objects']:
                 # Get all IDs and return the lowest one
                 ids = [obj['key'] for obj in result['objects'].values()]
                 return min(ids)
-            return None
-
-        except Exception as e:
-            print(f"Error executing query: {str(e)}")
-            return None
+        return None
 
     def create_machine(self, data: Dict, machine_class: str) -> bool:
         """Create a new machine in iTop"""
@@ -209,25 +146,30 @@ class ITopAPI:
             'output_fields': '*'
         }
 
-        try:
-            response = self.session.post(
-                f"{self.url}/webservices/rest.php?version=1.3",
-                auth=self.auth,
-                data={'json_data': json.dumps(payload)}
-            )
-            response.raise_for_status()
+        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+        response = requests.post(
+            f"{self.url}/webservices/rest.php?version=1.3",
+            auth=self.auth,
+            headers=headers,
+            data={'json_data': json.dumps(payload)},
+            verify=False
+        )
+        
+        print(f"Creation response status: {response.status_code}")
+        
+        if response.status_code == 200:
             result = response.json()
-
+            print(f"Creation response: {json.dumps(result, indent=2)}")
+            
             if result.get('code') == 0:
                 print(f"Successfully created {machine_class}: {data['name']}")
                 return True
             else:
                 print(f"Error creating {machine_class}: {result.get('message', 'Unknown error')}")
-                return False
-
-        except Exception as e:
-            print(f"Error creating {machine_class}: {str(e)}")
-            return False
+        else:
+            print(f"HTTP error: {response.status_code}")
+            
+        return False
 
 def check_os_exists(itop: ITopAPI, os_name: str, os_version: str) -> bool:
     """Check if both OS Family and Version exist"""
@@ -398,18 +340,11 @@ def main():
     
     args = parser.parse_args()
 
+    print(f"\nConnecting to iTop as {args.itop_user} at {args.itop_url}")
+    
     # Initialize iTop API client
     itop = ITopAPI(args.itop_url, args.itop_user, args.itop_password)
     
-    # Verify authentication before continuing
-    if not itop.connection_valid:
-        print("\nERROR: Failed to authenticate with iTop API.")
-        print(f"Please verify your credentials for user: {args.itop_user}")
-        print(f"URL: {args.itop_url}")
-        sys.exit(1)
-        
-    print(f"\nAuthentication successful. Connected to iTop as {args.itop_user}")
-
     # Process the CSV file
     process_csv_file(args.csv_file, itop)
 
