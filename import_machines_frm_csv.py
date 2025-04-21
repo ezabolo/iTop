@@ -13,7 +13,12 @@ import dns.resolver
 import requests
 import socket
 import logging
+import warnings
 from typing import Dict, List, Tuple, Optional
+
+# Disable InsecureRequestWarning
+from urllib3.exceptions import InsecureRequestWarning
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 # Configure logging
 logging.basicConfig(
@@ -30,6 +35,19 @@ logger = logging.getLogger(__name__)
 ITOP_URL = "http://your-itop-instance/webservices/rest.php"
 ITOP_USER = "admin"
 ITOP_PWD = "password"  # Consider using environment variables for credentials
+
+# Fallback IDs for common entities when search fails
+FALLBACK_IDS = {
+    "organizations": {
+        "CTHO": "1",  # Replace with actual ID
+        "CMSO": "2"   # Replace with actual ID
+    },
+    "os_families": {
+        "RHEL": "3",  # Replace with actual ID
+        "Windows": "4"  # Replace with actual ID
+    },
+    "os_versions": {}
+}
 
 # Organization mapping
 ORG_MAPPING = {
@@ -51,15 +69,41 @@ class iTopAPI:
         
     def search(self, object_type: str, query: Dict) -> Dict:
         """Search for objects in iTop based on query criteria"""
+        # Handle LIKE queries with % wildcard
+        using_like = False
+        for key, value in query.items():
+            if isinstance(value, str) and '%' in value:
+                using_like = True
+                break
+                
+        operation = 'core/get'
+        if using_like:
+            # Use OQL for LIKE queries
+            # Convert dict query to OQL format
+            oql_conditions = []
+            for key, value in query.items():
+                if isinstance(value, str) and '%' in value:
+                    # Remove % for OQL LIKE syntax
+                    cleaned_value = value.replace('%', '')
+                    oql_conditions.append(f"{key} LIKE '{cleaned_value}'")
+                else:
+                    oql_conditions.append(f"{key} = '{value}'")
+                    
+            oql_where = ' AND '.join(oql_conditions)
+            key = f"SELECT {object_type} WHERE {oql_where}"
+        else:
+            key = query
+            
         json_data = {
-            'operation': 'core/get',
+            'operation': operation,
             'class': object_type,
-            'key': query,
+            'key': key,
             'output_fields': 'id, name, managementip',
         }
         
         params = {**self.auth_params, 'json_data': json.dumps(json_data)}
-        response = requests.get(self.url, params=params)
+        # SSL verification disabled as requested
+        response = requests.get(self.url, params=params, verify=False)
         
         if response.status_code != 200:
             logger.error(f"Error searching iTop: {response.text}")
@@ -77,7 +121,8 @@ class iTopAPI:
         }
         
         params = {**self.auth_params, 'json_data': json.dumps(json_data)}
-        response = requests.post(self.url, params=params)
+        # SSL verification disabled as requested
+        response = requests.post(self.url, params=params, verify=False)
         
         if response.status_code != 200:
             logger.error(f"Error creating object in iTop: {response.text}")
@@ -87,35 +132,76 @@ class iTopAPI:
     
     def get_os_family_id(self, os_name: str) -> str:
         """Get the ID of an OS family by name, selecting the lowest ID if multiple exist"""
+        # Try exact match first
         result = self.search('OSFamily', {'name': os_name})
         
         if 'objects' in result and result['objects']:
             # Sort by ID and take the lowest
             os_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
             return str(min(os_ids))
+            
+        # Try partial match
+        result = self.search('OSFamily', {'name': f'%{os_name}%'})
         
+        if 'objects' in result and result['objects']:
+            # Sort by ID and take the lowest
+            os_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
+            return str(min(os_ids))
+        
+        # Check fallback IDs
+        if os_name in FALLBACK_IDS['os_families']:
+            logger.info(f"Using fallback ID for OS Family '{os_name}'")
+            return FALLBACK_IDS['os_families'][os_name]
+            
         logger.warning(f"OS Family '{os_name}' not found in iTop")
         return ""
     
     def get_os_version_id(self, os_version: str) -> str:
         """Get the ID of an OS version by name, selecting the lowest ID if multiple exist"""
+        # Try exact match first
         result = self.search('OSVersion', {'name': os_version})
         
         if 'objects' in result and result['objects']:
             # Sort by ID and take the lowest
             version_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
             return str(min(version_ids))
+            
+        # Try partial match
+        result = self.search('OSVersion', {'name': f'%{os_version}%'})
+        
+        if 'objects' in result and result['objects']:
+            # Sort by ID and take the lowest
+            version_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
+            return str(min(version_ids))
+            
+        # Check fallback IDs
+        if os_version in FALLBACK_IDS['os_versions']:
+            logger.info(f"Using fallback ID for OS Version '{os_version}'")
+            return FALLBACK_IDS['os_versions'][os_version]
         
         logger.warning(f"OS Version '{os_version}' not found in iTop")
         return ""
     
     def get_organization_id(self, org_name: str) -> str:
         """Get the ID of an organization by name"""
+        # Try exact match first
         result = self.search('Organization', {'name': org_name})
         
         if 'objects' in result and result['objects']:
             # Return the first organization ID found
             return list(result['objects'].keys())[0].split('::')[1]
+            
+        # Try partial match
+        result = self.search('Organization', {'name': f'%{org_name}%'})
+        
+        if 'objects' in result and result['objects']:
+            # Return the first organization ID found
+            return list(result['objects'].keys())[0].split('::')[1]
+            
+        # Check fallback IDs
+        if org_name in FALLBACK_IDS['organizations']:
+            logger.info(f"Using fallback ID for Organization '{org_name}'")
+            return FALLBACK_IDS['organizations'][org_name]
         
         logger.warning(f"Organization '{org_name}' not found in iTop")
         return ""
@@ -226,6 +312,9 @@ def process_csv(csv_file_path: str, itop_api: iTopAPI) -> None:
                 'diskspace': row['Provisioned_Storage']
             }
             
+            # Log the data being sent to iTop for debugging
+            logger.info(f"Creating {server_type} with data: {json.dumps(server_data)}")
+            
             # Create server in iTop
             create_result = itop_api.create(server_type, server_data)
             
@@ -242,6 +331,8 @@ def process_csv(csv_file_path: str, itop_api: iTopAPI) -> None:
 
 def main():
     """Main function"""
+    # Warning about disabled SSL verification
+    logger.warning("SSL certificate verification is disabled. This is insecure and should only be used in test environments.")
     if len(sys.argv) != 2:
         print(f"Usage: {sys.argv[0]} <csv_file_path>")
         sys.exit(1)
