@@ -1,0 +1,35 @@
+{
+   "operation":"core/create",
+   "comment":"{{itop_description}}",
+   "class":"VirtualMachine",
+   "output_fields":"id,friendlyname,managementip",
+   "fields":
+   {
+      "org_id":"SELECT Organization WHERE name = \"{{itop_organization}}\"",
+      "name":"{{itop_hostname}}",
+      "project":"{{itop_project}}",
+      "cmsofunction":"{{itop_environment}}",
+      "description":"{{itop_description}} - Created Date = {{created_date}}, Lease Days = {{itop_lease_days}}",
+      "devicetype":"Virtual Machine",
+      "business_criticity":"low",
+      "ownerorg":"{{itop_ordering_user}}",
+      "organization_name":"{{itop_organization}}",
+      "status":"production",
+      "currentstatus":"on",
+      "osfamily_id":"SELECT OSFamily WHERE name = \"{{itop_osfamily}}\"",
+      "osfamily_name":"{{itop_osfamily}}",
+      "osversion_id":"SELECT OSVersion WHERE name = \"{{itop_osversion}}\"",
+      "osversion_name":"{{itop_osversion}}",
+      "oslicence_name":"Enterprise",
+      "cpu":"{{itop_cpu}}",
+      "ram":"{{itop_ram}} GB",
+      "diskspace":"{{itop_disk}} GB",
+      "cmsonotes":"{{itop_reason}}",
+      "managementip":"{{itop_ip}}",
+      "move2production":"{{ansible_date_time.date}}",
+      "ynantivirus":"{{itop_antivirus}}",
+      "ynhips":"N",
+      "ynsplunk":"N",
+      "csamid":"{{ itop_csam_id}}"
+   }
+}
