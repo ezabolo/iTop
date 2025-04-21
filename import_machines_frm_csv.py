@@ -39,19 +39,21 @@ ITOP_PWD = "password"  # Consider using environment variables for credentials
 # Fallback IDs for common entities when search fails
 FALLBACK_IDS = {
     "organizations": {
-        "CTHO": "1",  # Replace with actual ID
-        "CMSO": "2"   # Replace with actual ID
+        "CHNO": "3",  # As specified
+        "CMSO": "2"    # As specified
     },
     "os_families": {
-        "RHEL": "3",  # Replace with actual ID
-        "Windows": "4"  # Replace with actual ID
+        "RHEL": "1",    # As specified
+        "Windows": "2"  # As specified
     },
-    "os_versions": {}
+    "os_versions": {
+        "8.10": "211"  # As specified
+    }
 }
 
 # Organization mapping
 ORG_MAPPING = {
-    "CTHO": {"ctho.asbn", "adu.dcn"},
+    "CHNO": {"ctho.asbn", "adu.dcn"},  # Renamed from CTHO to CHNO
     "CMSO": set()  # Default organization
 }
 
@@ -157,7 +159,13 @@ class iTopAPI:
         return ""
     
     def get_os_version_id(self, os_version: str) -> str:
-        """Get the ID of an OS version by name, selecting the lowest ID if multiple exist"""
+        """Get the ID of an OS version by name, or use hardcoded ID for specific versions"""
+        # Special case for version 8.10 as requested
+        if os_version == "8.10":
+            logger.info(f"Using specified ID 211 for OS Version '{os_version}'")
+            return "211"
+            
+        # For other versions, use dynamic lookup via OQL query
         # Try exact match first
         result = self.search('OSVersion', {'name': os_version})
         
@@ -174,7 +182,7 @@ class iTopAPI:
             version_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
             return str(min(version_ids))
             
-        # Check fallback IDs
+        # Check fallback IDs for any other hardcoded versions
         if os_version in FALLBACK_IDS['os_versions']:
             logger.info(f"Using fallback ID for OS Version '{os_version}'")
             return FALLBACK_IDS['os_versions'][os_version]
