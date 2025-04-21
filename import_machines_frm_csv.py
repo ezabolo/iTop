@@ -32,9 +32,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # iTop API configuration
-ITOP_URL = "https://my-itop.example.com/itop/weservices/rest.php"
-ITOP_USER = "admin"
-ITOP_PWD = "password"  # Consider using environment variables for credentials
+ITOP_URL = "https://myitop.example.com" # Base URL
+ITOP_API_ENDPOINT = f"{ITOP_URL}/webservices/rest.php" # REST API endpoint
+ITOP_USER = "itopuser"
+ITOP_PWD = "XXXX"  # Replace with your actual password
 ITOP_VERSION = "1.3"  # iTop API version
 
 # Fallback IDs for common entities when search fails
@@ -58,203 +59,250 @@ ORG_MAPPING = {
     "CMSO": set()  # Default organization
 }
 
-class iTopAPI:
-    """Class for interacting with the iTop REST API"""
+def call_itop_api(operation: str, class_name: str, key=None, fields=None, output_fields=None) -> Dict:
+    """
+    Helper function to make calls to the iTop REST API.
+    Implements the API structure as specified.
+    """
+    # Suppress insecure request warnings
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
-    def __init__(self, url: str, username: str, password: str, version: str = "1.3"):
-        self.url = url
-        self.username = username
-        self.password = password
-        self.version = version
-        self.auth_params = {
-            'auth_user': username,
-            'auth_pwd': password,
-            'version': version,
-        }
-        # Ensure warnings about insecure requests are suppressed
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        logger.info(f"Initialized iTopAPI with URL: {url}, version: {version}")
+    # Build the payload according to the specified structure
+    payload = {
+        'version': ITOP_VERSION,
+        'auth': {
+            'user': ITOP_USER,
+            'password': ITOP_PWD
+        },
+        'operation': operation,
+        'class': class_name,
+    }
+    
+    if key is not None:
+        payload['key'] = key
+    
+    if fields is not None:
+        payload['fields'] = fields
         
-    def search(self, object_type: str, query: Dict) -> Dict:
-        """Search for objects in iTop based on query criteria"""
-        # Handle LIKE queries with % wildcard
-        using_like = False
-        for key, value in query.items():
-            if isinstance(value, str) and '%' in value:
-                using_like = True
-                break
+    if output_fields is not None:
+        payload['output_fields'] = output_fields
+
+    # Log the request details
+    logger.debug(f"API Request to {ITOP_API_ENDPOINT}")
+    logger.debug(f"Operation: {operation}, Class: {class_name}")
+    logger.debug(f"Payload: {json.dumps(payload, indent=2, default=str)}")
+    
+    try:
+        # Make the API request with SSL verification disabled
+        response = requests.post(ITOP_API_ENDPOINT, json=payload, verify=False)
         
-        operation = 'core/get'
-        if using_like:
-            # Use OQL for LIKE queries
-            # Convert dict query to OQL format
-            oql_conditions = []
-            for key, value in query.items():
-                if isinstance(value, str) and '%' in value:
-                    # Remove % for OQL LIKE syntax
-                    cleaned_value = value.replace('%', '')
-                    oql_conditions.append(f"{key} LIKE '{cleaned_value}'")
-                else:
-                    oql_conditions.append(f"{key} = '{value}'")
-                    
-            oql_where = ' AND '.join(oql_conditions)
-            key = f"SELECT {object_type} WHERE {oql_where}"
+        # Log response details
+        logger.debug(f"Response status: {response.status_code}")
+        
+        # Raise exception for bad status codes
+        response.raise_for_status()
+        
+        # Parse and return JSON response
+        result = response.json()
+        logger.debug(f"Response data: {json.dumps(result, indent=2)}")
+        return result
+    
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API request failed: {e}")
+        return None
+    except json.JSONDecodeError:
+        logger.error("Failed to decode JSON response from iTop")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error during API call: {str(e)}")
+        return None
+
+
+def search_itop(name: str, ip: str = None) -> Dict:
+    """
+    Searches for a machine in iTop by name or IP.
+    Returns the iTop object data if found, None otherwise.
+    """
+    logger.info(f"Searching iTop for machine: {name} {f'({ip})' if ip else ''}")
+    
+    # Build OQL query to search by name or IP
+    conditions = [f"name = '{name}'"]
+    if ip:
+        conditions.append(f"managementip = '{ip}'")
+    
+    # Use OR to match either condition
+    oql_query = f"SELECT Server WHERE {' OR '.join(conditions)}"
+    logger.debug(f"OQL Query: {oql_query}")
+    
+    # Call the API
+    result = call_itop_api(
+        operation='core/get',
+        class_name='Server',  # We'll try Server first
+        key=oql_query,
+        output_fields='id, name, managementip, org_id, osfamily_id, osversion_id'
+    )
+    
+    # If not found as Server, try VirtualMachine
+    if not result or not result.get('objects'):
+        logger.debug("Not found as Server, trying VirtualMachine")
+        oql_query = f"SELECT VirtualMachine WHERE {' OR '.join(conditions)}"
+        result = call_itop_api(
+            operation='core/get',
+            class_name='VirtualMachine',
+            key=oql_query,
+            output_fields='id, name, managementip, org_id, osfamily_id, osversion_id'
+        )
+    
+    # Check if any objects were found
+    if result and result.get('objects'):
+        found_objects = result['objects']
+        if found_objects:
+            # Return the first object found
+            first_object_id = list(found_objects.keys())[0]
+            logger.info(f"Machine '{name}' found in iTop with ID: {first_object_id}")
+            return found_objects[first_object_id]
+    
+    logger.info(f"Machine '{name}' not found in iTop")
+    return None
+
+
+def create_itop_server(server_type: str, server_data: Dict) -> Dict:
+    """
+    Creates a new server or virtual machine in iTop.
+    """
+    logger.info(f"Creating {server_type} in iTop: {server_data['name']}")
+    
+    # Call the API to create the object
+    result = call_itop_api(
+        operation='core/create',
+        class_name=server_type,
+        fields=server_data
+    )
+    
+    if result and result.get('code') == 0:
+        if 'objects' in result and result['objects']:
+            # Get the ID of the created object
+            created_id = list(result['objects'].keys())[0]
+            logger.info(f"Successfully created {server_type} with ID: {created_id}")
+            return result
         else:
-            key = query
-        
-        # Format like curl would - POST with json_data as a parameter    
-        json_data = {
-            'operation': operation,
-            'class': object_type,
-            'key': key,
-            'output_fields': 'id, name, managementip',
-        }
-        
-        # Debug the JSON data being sent
-        logger.debug(f"Search query for {object_type}: {json.dumps(json_data, indent=2)}")
-        
-        # Use POST with form data like curl would
-        form_data = {**self.auth_params, 'json_data': json.dumps(json_data)}
-        
-        try:
-            # SSL verification explicitly disabled as requested
-            headers = {'User-Agent': 'Python iTop Client'}
-            response = requests.post(self.url, data=form_data, headers=headers, verify=False)
-            
-            logger.debug(f"Response status: {response.status_code}")
-            logger.debug(f"Response headers: {response.headers}")
-            
-            if response.status_code != 200:
-                logger.error(f"Error searching iTop: {response.text}")
-                return {"objects": {}}
-            
-            result = response.json()
-            logger.debug(f"Search result: {json.dumps(result, indent=2)}")
+            logger.warning(f"Creation succeeded but no object ID returned")
             return result
-            
-        except Exception as e:
-            logger.error(f"Exception during iTop search: {str(e)}")
-            return {"objects": {}}
+    else:
+        error_msg = result.get('message', 'Unknown error') if result else 'API call failed'
+        logger.error(f"Failed to create {server_type}: {error_msg}")
+        return None
+
+
+def get_organization_id(org_name: str) -> str:
+    """
+    Get the ID of an organization by name, using hardcoded values for known organizations.
+    """
+    # Check fallback IDs first for known organizations
+    if org_name in FALLBACK_IDS['organizations']:
+        logger.info(f"Using hardcoded ID for Organization '{org_name}'")
+        return FALLBACK_IDS['organizations'][org_name]
+        
+    # For unknown organizations, attempt to find them in iTop
+    oql_query = f"SELECT Organization WHERE name = '{org_name}'"
+    result = call_itop_api(
+        operation='core/get',
+        class_name='Organization',
+        key=oql_query
+    )
     
-    def create(self, object_type: str, data: Dict) -> Dict:
-        """Create a new object in iTop"""
-        json_data = {
-            'operation': 'core/create',
-            'class': object_type,
-            'fields': data,
-            'comment': 'Created via CSV import script',
-        }
-        
-        # Debug the JSON data being sent
-        logger.debug(f"Create request for {object_type}: {json.dumps(json_data, indent=2)}")
-        
-        # Use POST with form data like curl would
-        form_data = {**self.auth_params, 'json_data': json.dumps(json_data)}
-        
-        try:
-            # SSL verification explicitly disabled as requested
-            headers = {'User-Agent': 'Python iTop Client'}
-            response = requests.post(self.url, data=form_data, headers=headers, verify=False)
-            
-            logger.debug(f"Response status: {response.status_code}")
-            logger.debug(f"Response headers: {response.headers}")
-            
-            if response.status_code != 200:
-                logger.error(f"Error creating object in iTop: {response.text}")
-                return {"code": 99, "message": response.text}
-            
-            result = response.json()
-            logger.debug(f"Create result: {json.dumps(result, indent=2)}")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Exception during iTop create: {str(e)}")
-            return {"code": 99, "message": str(e)}
+    if result and result.get('objects'):
+        # Return the first organization ID found
+        org_id = list(result['objects'].keys())[0].split('::')[1]
+        return org_id
     
-    def get_os_family_id(self, os_name: str) -> str:
-        """Get the ID of an OS family by name, using hardcoded values for known OS families"""
-        # Check fallback IDs first for known OS families
-        if os_name in FALLBACK_IDS['os_families']:
-            logger.info(f"Using hardcoded ID for OS Family '{os_name}'")
-            return FALLBACK_IDS['os_families'][os_name]
-        
-        # For unknown OS families, attempt to find them in iTop
-        # Try exact match
-        result = self.search('OSFamily', {'name': os_name})
-        
-        if 'objects' in result and result['objects']:
-            # Sort by ID and take the lowest
-            os_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
-            return str(min(os_ids))
-            
-        # Try partial match
-        result = self.search('OSFamily', {'name': f'%{os_name}%'})
-        
-        if 'objects' in result and result['objects']:
-            # Sort by ID and take the lowest
-            os_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
-            return str(min(os_ids))
-            
-        logger.warning(f"OS Family '{os_name}' not found in iTop and no hardcoded ID available")
-        return ""
+    logger.warning(f"Organization '{org_name}' not found in iTop and no hardcoded ID available")
+    return ""
+
+
+def get_os_family_id(os_name: str) -> str:
+    """
+    Get the ID of an OS family by name, using hardcoded values for known OS families.
+    """
+    # Check fallback IDs first for known OS families
+    if os_name in FALLBACK_IDS['os_families']:
+        logger.info(f"Using hardcoded ID for OS Family '{os_name}'")
+        return FALLBACK_IDS['os_families'][os_name]
     
-    def get_os_version_id(self, os_version: str) -> str:
-        """Get the ID of an OS version by name, or use hardcoded ID for specific versions"""
-        # Check fallback IDs first for known OS versions
-        if os_version in FALLBACK_IDS['os_versions']:
-            logger.info(f"Using hardcoded ID for OS Version '{os_version}'")
-            return FALLBACK_IDS['os_versions'][os_version]
-        
-        # Special case for version 8.10 as requested (redundant since it's in fallbacks but kept for clarity)
-        if os_version == "8.10":
-            logger.info(f"Using specified ID 211 for OS Version '{os_version}'")
-            return "211"
-            
-        # For other versions, use dynamic lookup via OQL query
-        # Try exact match first
-        result = self.search('OSVersion', {'name': os_version})
-        
-        if 'objects' in result and result['objects']:
-            # Sort by ID and take the lowest
-            version_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
-            return str(min(version_ids))
-            
-        # Try partial match
-        result = self.search('OSVersion', {'name': f'%{os_version}%'})
-        
-        if 'objects' in result and result['objects']:
-            # Sort by ID and take the lowest
-            version_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
-            return str(min(version_ids))
-        
-        logger.warning(f"OS Version '{os_version}' not found in iTop and no hardcoded ID available")
-        return ""
+    # For unknown OS families, attempt to find them in iTop
+    oql_query = f"SELECT OSFamily WHERE name = '{os_name}'"
+    result = call_itop_api(
+        operation='core/get',
+        class_name='OSFamily',
+        key=oql_query
+    )
     
-    def get_organization_id(self, org_name: str) -> str:
-        """Get the ID of an organization by name, using hardcoded values for known organizations"""
-        # Check fallback IDs first for known organizations
-        if org_name in FALLBACK_IDS['organizations']:
-            logger.info(f"Using hardcoded ID for Organization '{org_name}'")
-            return FALLBACK_IDS['organizations'][org_name]
-            
-        # For unknown organizations, attempt to find them in iTop
-        # Try exact match
-        result = self.search('Organization', {'name': org_name})
+    if result and result.get('objects'):
+        # Sort by ID and take the lowest
+        os_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
+        return str(min(os_ids))
+    
+    # Try partial match if exact match failed
+    oql_query = f"SELECT OSFamily WHERE name LIKE '%{os_name}%'"
+    result = call_itop_api(
+        operation='core/get',
+        class_name='OSFamily',
+        key=oql_query
+    )
+    
+    if result and result.get('objects'):
+        # Sort by ID and take the lowest
+        os_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
+        return str(min(os_ids))
         
-        if 'objects' in result and result['objects']:
-            # Return the first organization ID found
-            return list(result['objects'].keys())[0].split('::')[1]
-            
-        # Try partial match
-        result = self.search('Organization', {'name': f'%{org_name}%'})
+    logger.warning(f"OS Family '{os_name}' not found in iTop and no hardcoded ID available")
+    return ""
+
+
+def get_os_version_id(os_version: str) -> str:
+    """
+    Get the ID of an OS version by name, or use hardcoded ID for specific versions.
+    """
+    # Check fallback IDs first for known OS versions (including 8.10)
+    if os_version in FALLBACK_IDS['os_versions']:
+        logger.info(f"Using hardcoded ID for OS Version '{os_version}'")
+        return FALLBACK_IDS['os_versions'][os_version]
+    
+    # For other versions, use dynamic lookup via OQL query
+    oql_query = f"SELECT OSVersion WHERE name = '{os_version}'"
+    result = call_itop_api(
+        operation='core/get',
+        class_name='OSVersion',
+        key=oql_query
+    )
+    
+    if result and result.get('objects'):
+        # Sort by ID and take the lowest
+        version_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
+        return str(min(version_ids))
         
-        if 'objects' in result and result['objects']:
-            # Return the first organization ID found
-            return list(result['objects'].keys())[0].split('::')[1]
-        
-        logger.warning(f"Organization '{org_name}' not found in iTop and no hardcoded ID available")
-        return ""
+    # Try partial match if exact match failed
+    oql_query = f"SELECT OSVersion WHERE name LIKE '%{os_version}%'"
+    result = call_itop_api(
+        operation='core/get',
+        class_name='OSVersion',
+        key=oql_query
+    )
+    
+    if result and result.get('objects'):
+        # Sort by ID and take the lowest
+        version_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
+        return str(min(version_ids))
+    
+    logger.warning(f"OS Version '{os_version}' not found in iTop and no hardcoded ID available")
+    return ""
+    
+
+    
+
+    
+
 
 
 def verify_fqdn_ip_match(fqdn: str, ip: str) -> bool:
@@ -292,7 +340,7 @@ def determine_organization(fqdn: str) -> str:
     return "CMSO"  # Default organization
 
 
-def process_csv(csv_file_path: str, itop_api: iTopAPI) -> None:
+def process_csv(csv_file_path: str) -> None:
     """Process the CSV file and import servers into iTop"""
     skipped_count = 0
     created_count = 0
@@ -321,24 +369,24 @@ def process_csv(csv_file_path: str, itop_api: iTopAPI) -> None:
                 continue
             
             # Step 2: Check if server exists in iTop
-            server_type = determine_server_type(fqdn)
-            search_result = itop_api.search(server_type, {'name': fqdn})
+            existing_server = search_itop(fqdn, ip)
             
-            if search_result.get('objects'):
+            if existing_server:
                 logger.info(f"Server {fqdn} already exists in iTop, skipping")
                 already_exists_count += 1
                 continue
             
             # Step 3: Create server in iTop
+            server_type = determine_server_type(fqdn)
             organization = determine_organization(fqdn)
             logger.info(f"Determined organization: {organization} for {fqdn}")
-            org_id = itop_api.get_organization_id(organization)
+            org_id = get_organization_id(organization)
             
             logger.info(f"Using OS Name: {row['OS_Name']} for {fqdn}")
-            os_family_id = itop_api.get_os_family_id(row['OS_Name'])
+            os_family_id = get_os_family_id(row['OS_Name'])
             
             logger.info(f"Using OS Version: {row['OS_Version']} for {fqdn}")
-            os_version_id = itop_api.get_os_version_id(row['OS_Version'])
+            os_version_id = get_os_version_id(row['OS_Version'])
             
             logger.info(f"Retrieved IDs - Org: {org_id}, OS Family: {os_family_id}, OS Version: {os_version_id}")
             
@@ -373,27 +421,32 @@ def process_csv(csv_file_path: str, itop_api: iTopAPI) -> None:
             logger.info(f"Creating {server_type} with data: {json.dumps(server_data)}")
             
             # Create server in iTop
-            create_result = itop_api.create(server_type, server_data)
+            create_result = create_itop_server(server_type, server_data)
             
-            if create_result.get('code') == 0:
+            if create_result and create_result.get('code') == 0:
                 logger.info(f"Successfully created {server_type} {fqdn} in iTop")
                 created_count += 1
             else:
-                logger.error(f"Failed to create {server_type} {fqdn} in iTop: {create_result.get('message')}")
+                error_msg = create_result.get('message', 'Unknown error') if create_result else 'API call failed'
+                logger.error(f"Failed to create {server_type} {fqdn} in iTop: {error_msg}")
                 skipped_count += 1
     
     # Report summary
     logger.info(f"Import complete: {created_count} servers created, {already_exists_count} already exist, {skipped_count} skipped")
 
 
-def test_itop_connection(itop_api):
+def test_itop_connection():
     """Test the connection to iTop"""
     logger.info("Testing connection to iTop server...")
     try:
         # Try a simple query to test the connection
-        result = itop_api.search('Organization', {'id': '1'})
-        logger.info(f"Connection test result: {result}")
-        if 'objects' in result:
+        result = call_itop_api(
+            operation='core/get',
+            class_name='Organization',
+            key="SELECT Organization LIMIT 1"
+        )
+        
+        if result and result.get('objects'):
             logger.info("Successfully connected to iTop!")
             return True
         else:
@@ -414,13 +467,10 @@ def main():
     csv_file_path = sys.argv[1]
     
     try:
-        # Initialize iTop API with specified version
-        itop_api = iTopAPI(ITOP_URL, ITOP_USER, ITOP_PWD, ITOP_VERSION)
-        
-        # Test connection first
-        if test_itop_connection(itop_api):
-            # Process CSV
-            process_csv(csv_file_path, itop_api)
+        # Test connection first using the new API structure
+        if test_itop_connection():
+            # Process CSV using the new API functions
+            process_csv(csv_file_path)
         else:
             logger.error("Unable to continue due to iTop connection issues")
             sys.exit(1)
