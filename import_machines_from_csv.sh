@@ -1,464 +1,552 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
+"""
+iTop Server Import Tool
 
-# --- Configuration ---
-ITOP_URL="https://myitop.example.com" # CHANGE THIS: Base URL of your iTop instance
-ITOP_API_ENDPOINT="${ITOP_URL}/webservices/rest.php" # REST API endpoint
-ITOP_USER="itopuser"                 # CHANGE THIS: Your iTop API username
-ITOP_PWD="XXXXXX"                    # CHANGE THIS: Your iTop API password
-ITOP_VERSION="1.3"                   # iTop API version to use
-LOG_FILE="itop_import_$(date +%Y%m%d_%H%M%S).log"
+This script reads server information from a CSV file and imports it into iTop.
+It verifies FQDN-IP matches and checks if servers already exist in iTop before creating them.
+"""
 
-# CSV Header expected order (for reference)
-# FQDN,IP_Address,AO_Branch,AO_Application,OS_Name,OS_Version,CPU,Memory,Provisioned_Storage,Used_Storage
+import csv
+import sys
+import json
+import dns.resolver
+import requests
+import socket
+import logging
+import warnings
+from typing import Dict, List, Tuple, Optional
 
-# --- Logging ---
-# Function to log messages to both stdout/stderr and the log file
-log() {
-    local level="$1"
-    shift
-    local message="$*"
-    local timestamp
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    local log_line="${timestamp} - ${level^^} - ${message}"
+# Disable InsecureRequestWarning
+from urllib3.exceptions import InsecureRequestWarning
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
-    # Log to file
-    echo "${log_line}" >> "$LOG_FILE"
-    # Log to console (INFO to stdout, others to stderr)
-    if [[ "$level" == "INFO" ]]; then
-        echo "${log_line}"
-    else
-        echo "${log_line}" >&2
-    fi
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,  # Change to DEBUG for more verbose output
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("itop_import.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# iTop API configuration
+ITOP_URL = "https://myitop.example.com" # Base URL
+ITOP_API_ENDPOINT = f"{ITOP_URL}/webservices/rest.php" # REST API endpoint
+ITOP_USER = "itopuser"
+ITOP_PWD = "XXXX"  # Replace with your actual password
+ITOP_VERSION = "1.3"  # iTop API version
+
+# Fallback IDs for common entities when search fails
+FALLBACK_IDS = {
+    "organizations": {
+        "CHNO": "3",  # As specified
+        "CMSO": "2"    # As specified
+    },
+    "os_families": {
+        "RHEL": "1",    # As specified
+        "Windows": "2"  # As specified
+    },
+    "os_versions": {
+        "8.10": "211"  # As specified
+    }
 }
 
-# --- Helper Functions ---
-
-# Function to make calls to the iTop REST API using curl and jq
-# Usage: call_itop_api <operation> <class_name> [key_json] [fields_json] [output_fields_json]
-# Returns JSON response on stdout if successful, empty string and logs error on failure. Returns non-zero exit code on curl/jq errors.
-call_itop_api() {
-    local operation="$1"
-    local class_name="$2"
-    local key_json="${3:-null}"
-    local fields_json="${4:-null}"
-    local output_fields_json="${5:-null}"
-    local payload
-    local response
-    local curl_exit_code
-
-    # Construct the JSON payload using jq
-    payload=$(jq -n \
-        --arg version "$ITOP_VERSION" \
-        --arg user "$ITOP_USER" \
-        --arg password "$ITOP_PWD" \
-        --arg op "$operation" \
-        --arg class "$class_name" \
-        --argjson key "$key_json" \
-        --argjson fields "$fields_json" \
-        --argjson output_fields "$output_fields_json" \
-        '{
-            version: $version,
-            auth: { user: $user, password: $password },
-            operation: $op,
-            class: $class,
-            key: (if $key == null then null else $key end),
-            fields: (if $fields == null then null else $fields end),
-            output_fields: (if $output_fields == null then null else $output_fields end)
-        } | del(..|nulls)') # Remove keys with null values
-
-    if [[ -z "$payload" ]]; then
-        log "ERROR" "Failed to construct JSON payload for ${operation} ${class_name}"
-        return 1
-    fi
-
-    log "DEBUG" "API Request to ${ITOP_API_ENDPOINT}"
-    log "DEBUG" "Operation: ${operation}, Class: ${class_name}"
-    log "DEBUG" "Payload: $(echo "$payload" | jq -c .)"
-
-    # Make the API request with curl, disable SSL verification (-k)
-    response=$(curl -k -s -X POST \
-        -H "Content-Type: application/json" \
-        -d "$payload" \
-        "$ITOP_API_ENDPOINT")
-    curl_exit_code=$?
-
-    if [[ $curl_exit_code -ne 0 ]]; then
-        log "ERROR" "API request failed (curl error code: $curl_exit_code) for ${operation} ${class_name}"
-        return 1
-    fi
-
-    if ! echo "$response" | jq -e . > /dev/null; then
-         log "ERROR" "Failed to decode JSON response from iTop for ${operation} ${class_name}. Response was: ${response}"
-         return 1
-    fi
-
-    log "DEBUG" "Response status: $(echo "$response" | jq -r '.code // "N/A"')"
-    log "DEBUG" "Response data: $(echo "$response" | jq -c .)"
-
-    echo "$response"
-    return 0
+# Organization mapping
+ORG_MAPPING = {
+    "CHNO": {"ctho.asbn", "adu.dcn"},  # Renamed from CTHO to CHNO
+    "CMSO": set()  # Default organization
 }
 
-# Verify if the FQDN resolves to the given IP address using dig
-# Usage: verify_fqdn_ip_match <fqdn> <ip>
-# Returns 0 if match, 1 if mismatch or resolution error.
-verify_fqdn_ip_match() {
-    local fqdn="$1"
-    local ip="$2"
-    local resolved_ips
-    local resolved_hostname
-    local match=1 # 0 = match, 1 = no match
+def call_itop_api(operation: str, class_name: str = None, key=None, fields=None, output_fields=None, comment=None) -> Dict:
+    """
+    Helper function to make calls to the iTop REST API.
+    Implements the API structure according to official iTop documentation.
+    """
+    # Suppress insecure request warnings
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    # Build the JSON payload
+    json_data = {
+        'operation': operation
+    }
+    
+    # Add operation-specific parameters
+    if class_name is not None:
+        json_data['class'] = class_name
+    
+    if key is not None:
+        json_data['key'] = key
+    
+    if fields is not None:
+        json_data['fields'] = fields
+        
+    if output_fields is not None:
+        json_data['output_fields'] = output_fields
+        
+    if comment is not None:
+        json_data['comment'] = comment
 
-    # Try forward DNS lookup (A record)
-    resolved_ips=$(dig +short "$fqdn" A @8.8.8.8) # Using Google DNS for consistency, remove @8.8.8.8 to use local resolver
-    if [[ $? -eq 0 && -n "$resolved_ips" ]]; then
-        if echo "$resolved_ips" | grep -q -w "$ip"; then
-            log "DEBUG" "Forward DNS match: ${fqdn} resolves to ${ip}"
-            match=0
-        fi
-    else
-        log "DEBUG" "Forward DNS resolution failed or returned no A records for ${fqdn}"
-    fi
-
-    # If forward didn't match, try reverse DNS lookup (PTR record)
-    if [[ $match -ne 0 ]]; then
-        resolved_hostname=$(dig +short -x "$ip" @8.8.8.8 | head -n 1 | sed 's/\.$//') # Using Google DNS
-         if [[ $? -eq 0 && -n "$resolved_hostname" ]]; then
-            # Case-insensitive comparison
-            if [[ "$(echo "$resolved_hostname" | tr '[:upper:]' '[:lower:]')" == "$(echo "$fqdn" | tr '[:upper:]' '[:lower:]')" ]]; then
-                 log "DEBUG" "Reverse DNS match: ${ip} resolves to ${fqdn}"
-                match=0
-            fi
-        else
-             log "DEBUG" "Reverse DNS resolution failed or returned no PTR record for ${ip}"
-        fi
-    fi
-
-    if [[ $match -ne 0 ]]; then
-         log "WARN" "DNS Verification FAILED: FQDN-IP mismatch or resolution error for FQDN='${fqdn}' IP='${ip}'"
-    fi
-
-    return $match
-}
-
-# Searches for a machine in iTop by name or IP.
-# Usage: search_itop <name> [ip]
-# Returns 0 if found, 1 if not found, >1 on API error. Outputs found object JSON on stdout if found.
-search_itop() {
-    local name="$1"
-    local ip="$2"
-    local oql_query
-    local conditions=()
-    local result_json
-    local found_object_json
-
-    log "INFO" "Searching iTop for machine: ${name} ${ip:+($ip)}"
-
-    # Build OQL query conditions
-    conditions+=("name = '${name}'")
-    if [[ -n "$ip" ]]; then
-        conditions+=("managementip = '${ip}'")
-    fi
-    local joined_conditions
-    printf -v joined_conditions " OR %s" "${conditions[@]}"
-    joined_conditions="${joined_conditions:4}" # Remove leading " OR "
-
-    local search_classes=("Server" "VirtualMachine")
-    for class in "${search_classes[@]}"; do
-        oql_query="SELECT ${class} WHERE ${joined_conditions}"
-        log "DEBUG" "OQL Query (${class}): ${oql_query}"
-
-        local key_jq; key_jq=$(jq -n --arg q "$oql_query" '$q')
-        local output_fields_jq; output_fields_jq=$(jq -n --arg f 'id, name' '$f') # Only need ID/name to confirm existence
-
-        result_json=$(call_itop_api 'core/get' "$class" "$key_jq" null "$output_fields_jq")
-        if [[ $? -ne 0 ]]; then return 2; fi # Propagate API call error
-
-        found_object_json=$(echo "$result_json" | jq -c '.objects | select(. != null and . != {}) | to_entries[0].value // empty')
-
-        if [[ -n "$found_object_json" ]]; then
-             local found_id; found_id=$(echo "$found_object_json" | jq -r '.id // "unknown"')
-             log "INFO" "Machine '${name}' found in iTop (as ${class}) with ID: ${found_id}. Skipping."
-             echo "$found_object_json" # Output JSON for potential use (though we just skip)
-             return 0 # Found
-        fi
-    done
-
-    log "INFO" "Machine '${name}' not found in iTop. Proceeding to creation."
-    return 1 # Not found
-}
-
-# Gets the ID for an entity (Org, OS Family, OS Version) by name from iTop.
-# Usage: get_itop_id <Entity Name for logs> <iTop Class Name> <Name to Search>
-# Special handling for OS Family/Version: returns the *lowest* ID if multiple found.
-# Returns ID on stdout if found, empty string if not. Returns non-zero on API errors or if not found.
-get_itop_id() {
-    local entity_log_name="$1" # e.g., "Organization"
-    local class_name="$2"      # e.g., "Organization"
-    local name_to_search="$3"
-    local id=""
-    local result_json
-    local oql_query
-
-    if [[ -z "$name_to_search" ]]; then
-        log "ERROR" "Cannot search for empty ${entity_log_name} name."
-        return 1
-    fi
-
-    log "DEBUG" "Querying iTop for ${entity_log_name} ID for name: '${name_to_search}'"
-    oql_query="SELECT ${class_name} WHERE name = '${name_to_search}'"
-    local key_jq; key_jq=$(jq -n --arg q "$oql_query" '$q')
-    local output_fields_jq; output_fields_jq=$(jq -n --arg f 'id' '$f') # Only need the ID
-
-    result_json=$(call_itop_api 'core/get' "$class_name" "$key_jq" null "$output_fields_jq")
-    if [[ $? -ne 0 ]]; then
-        log "ERROR" "API error while querying ID for ${entity_log_name} '${name_to_search}'."
-        return 2 # API error
-    fi
-
-    # Extract ID(s)
-    if [[ "$class_name" == "OSFamily" || "$class_name" == "OSVersion" ]]; then
-        # For OSFamily/OSVersion, find the *lowest* numeric ID if multiple matches
-        id=$(echo "$result_json" | jq -r '[.objects | select(. != null and . != {}) | keys[]? | split("::")[1] | tonumber] | sort | .[0] // empty')
-         if [[ -n "$id" ]]; then
-             log "INFO" "Found lowest ID '${id}' for ${entity_log_name} '${name_to_search}'."
-         fi
-    else
-        # For Organization (assume unique name), take the first one found
-        id=$(echo "$result_json" | jq -r '.objects | select(. != null and . != {}) | keys[0]? | split("::")[1] // empty')
-         if [[ -n "$id" ]]; then
-             log "INFO" "Found ID '${id}' for ${entity_log_name} '${name_to_search}'."
-         fi
-    fi
-
-    if [[ -z "$id" ]]; then
-        log "ERROR" "Could not find ID for ${entity_log_name} with name '${name_to_search}' in iTop."
-        return 1 # Not found
-    fi
-
-    echo "$id" # Output the found ID
-    return 0  # Success
-}
-
-# Creates a new server or virtual machine in iTop.
-# Usage: create_itop_server <server_type> <fields_json>
-# Returns 0 on success, 1 on failure.
-create_itop_server() {
-    local server_type="$1"
-    local fields_json="$2"
-    local name
-    name=$(echo "$fields_json" | jq -r '.name // "unknown"')
-    local result_json
-
-    log "INFO" "Attempting to create ${server_type} in iTop: ${name}"
-    log "DEBUG" "Creation fields: $(echo "$fields_json" | jq -c .)"
-
-    result_json=$(call_itop_api 'core/create' "$server_type" null "$fields_json")
-    local api_call_status=$?
-
-    if [[ $api_call_status -ne 0 ]]; then
-        log "ERROR" "Failed to create ${server_type} ${name}: API call failed during creation."
-        return 1
-    fi
-
-    local result_code; result_code=$(echo "$result_json" | jq -r '.code // -1')
-    local created_id_key; created_id_key=$(echo "$result_json" | jq -r '.objects | select(. != null) | keys[0]? // empty')
-
-    if [[ "$result_code" == "0" && -n "$created_id_key" ]]; then
-        log "INFO" "Successfully created ${server_type} ${name} with ID: ${created_id_key}"
-        return 0
-    else
-        local error_msg; error_msg=$(echo "$result_json" | jq -r '.message // "Unknown creation error"')
-        log "ERROR" "Failed to create ${server_type} ${name} in iTop. Code: ${result_code}, Message: ${error_msg}"
-        return 1
-    fi
-}
-
-# Determine iTop class based on FQDN
-# Usage: determine_server_type <fqdn>
-# Returns "Server" or "VirtualMachine" on stdout
-determine_server_type() {
-    local fqdn="$1"
-    local fqdn_lower
-    fqdn_lower=$(echo "$fqdn" | tr '[:upper:]' '[:lower:]')
-
-    if [[ "$fqdn_lower" == *ctho.asbn* || "$fqdn_lower" == *adu.dcn* ]]; then
-        echo "Server"
-    else
-        echo "VirtualMachine"
-    fi
-}
-
-# Determine Organization Name based on FQDN
-# Usage: determine_organization_name <fqdn>
-# Returns "CTHO" or "CMSO" on stdout
-determine_organization_name() {
-    local fqdn="$1"
-    local fqdn_lower
-    fqdn_lower=$(echo "$fqdn" | tr '[:upper:]' '[:lower:]')
-
-    if [[ "$fqdn_lower" == *ctho.asbn* || "$fqdn_lower" == *adu.dcn* ]]; then
-        echo "CTHO"
-    else
-        echo "CMSO"
-    fi
-}
+    # Form data parameters (as expected by iTop REST API)
+    form_data = {
+        'version': ITOP_VERSION,
+        'auth_user': ITOP_USER,
+        'auth_pwd': ITOP_PWD,
+        'json_data': json.dumps(json_data)
+    }
+    
+    # Log the request details
+    logger.debug(f"API Request to {ITOP_API_ENDPOINT}")
+    logger.debug(f"Operation: {operation}, Class: {class_name}")
+    logger.debug(f"JSON Data: {json.dumps(json_data, indent=2, default=str)}")
+    
+    try:
+        # Make the API request with SSL verification disabled
+        # Using POST with form data as per iTop documentation
+        response = requests.post(
+            ITOP_API_ENDPOINT,
+            data=form_data,  # Use form data, not JSON payload
+            verify=False
+        )
+        
+        # Log response details
+        logger.debug(f"Response status: {response.status_code}")
+        logger.debug(f"Response headers: {response.headers}")
+        logger.debug(f"Response text: {response.text[:200]}..." if len(response.text) > 200 else response.text)
+        
+        # Raise exception for bad status codes
+        response.raise_for_status()
+        
+        # Parse and return JSON response
+        result = response.json()
+        if result.get('code') != 0:
+            logger.error(f"API error: {result.get('message')}")
+            logger.error(f"Full response: {json.dumps(result, indent=2)}")
+        else:
+            logger.debug(f"Success response: {result.get('message')}")
+            
+        return result
+    
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API request failed: {e}")
+        return None
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to decode JSON response: {e}")
+        logger.error(f"Raw response: {response.text[:500]}" if 'response' in locals() else "No response")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error during API call: {str(e)}")
+        return None
 
 
-# --- Main Script ---
-log "INFO" "Starting iTop import script..."
-log "WARN" "SSL certificate verification is disabled via curl '-k'. This is insecure for production."
+def search_itop(name: str, ip: str = None) -> Dict:
+    """
+    Searches for a machine in iTop by name or IP.
+    Returns the iTop object data if found, None otherwise.
+    """
+    logger.info(f"Searching iTop for machine: {name} {f'({ip})' if ip else ''}")
+    
+    # Build OQL query to search by name or IP
+    conditions = []
+    if name:
+        # Use LIKE for case-insensitive search
+        conditions.append(f"name LIKE '{name}'")
+    if ip:
+        conditions.append(f"managementip = '{ip}'")
+    
+    if not conditions:
+        logger.warning("No search criteria provided")
+        return None
+        
+    # Use OR to match either condition
+    condition_str = ' OR '.join(conditions)
+    
+    # Try Server class first
+    logger.debug(f"Searching in Server class")
+    oql_query = f"SELECT Server WHERE {condition_str}"
+    logger.debug(f"OQL Query: {oql_query}")
+    
+    # Call the API
+    result = call_itop_api(
+        operation='core/get',
+        class_name='Server',
+        key=oql_query,
+        output_fields='id, name, managementip, org_id, osfamily_id, osversion_id'
+    )
+    
+    # If not found as Server, try VirtualMachine
+    if not result or not result.get('objects') or len(result.get('objects', {})) == 0:
+        logger.debug("Not found as Server, trying VirtualMachine")
+        oql_query = f"SELECT VirtualMachine WHERE {condition_str}"
+        result = call_itop_api(
+            operation='core/get',
+            class_name='VirtualMachine',
+            key=oql_query,
+            output_fields='id, name, managementip, org_id, osfamily_id, osversion_id'
+        )
+    
+    # Check if any objects were found
+    if result and result.get('objects') and len(result.get('objects', {})) > 0:
+        found_objects = result['objects']
+        # Return the first object found
+        first_object_id = list(found_objects.keys())[0]
+        logger.info(f"Machine '{name}' found in iTop with ID: {first_object_id}")
+        return found_objects[first_object_id]
+    
+    logger.info(f"Machine '{name}' not found in iTop")
+    return None
 
-# Check for dependencies
-if ! command -v jq &> /dev/null; then
-    log "ERROR" "jq command could not be found. Please install jq."
-    exit 1
-fi
-if ! command -v dig &> /dev/null; then
-    log "ERROR" "dig command could not be found. Please install DNS utilities (e.g., dnsutils, bind-utils)."
-    exit 1
-fi
-if ! command -v curl &> /dev/null; then
-    log "ERROR" "curl command could not be found. Please install curl."
-    exit 1
-fi
 
-# Check command line arguments
-if [[ "$#" -ne 1 ]]; then
-    log "ERROR" "Usage: $0 <csv_file_path>"
-    exit 1
-fi
+def create_itop_server(server_type: str, server_data: Dict) -> Dict:
+    """
+    Creates a new server or virtual machine in iTop.
+    """
+    logger.info(f"Creating {server_type} in iTop: {server_data['name']}")
+    
+    # Call the API to create the object
+    result = call_itop_api(
+        operation='core/create',
+        class_name=server_type,
+        fields=server_data,
+        comment='Created via CSV import script',
+        output_fields='id, name, managementip, org_id, osfamily_id, osversion_id'
+    )
+    
+    if result and result.get('code') == 0:
+        if 'objects' in result and result['objects']:
+            # Get the ID of the created object
+            created_id = list(result['objects'].keys())[0]
+            logger.info(f"Successfully created {server_type} with ID: {created_id}")
+            return result
+        else:
+            logger.warning(f"Creation succeeded but no object ID returned")
+            return result
+    else:
+        error_msg = result.get('message', 'Unknown error') if result else 'API call failed'
+        logger.error(f"Failed to create {server_type}: {error_msg}")
+        return None
 
-csv_file_path="$1"
-if [[ ! -f "$csv_file_path" ]]; then
-    log "ERROR" "CSV file not found: ${csv_file_path}"
-    exit 1
-fi
 
-# Counters
-skipped_dns_mismatch=0
-skipped_already_exists=0
-skipped_id_lookup_error=0
-skipped_creation_error=0
-created_count=0
-processed_count=0
+def get_organization_id(org_name: str) -> str:
+    """
+    Get the ID of an organization by name, using hardcoded values for known organizations.
+    """
+    # Check fallback IDs first for known organizations
+    if org_name in FALLBACK_IDS['organizations']:
+        logger.info(f"Using hardcoded ID for Organization '{org_name}'")
+        return FALLBACK_IDS['organizations'][org_name]
+        
+    # For unknown organizations, attempt to find them in iTop
+    # Use LIKE for case-insensitive matching
+    oql_query = f"SELECT Organization WHERE name LIKE '{org_name}'"
+    result = call_itop_api(
+        operation='core/get',
+        class_name='Organization',
+        key=oql_query
+    )
+    
+    if result and result.get('code') == 0 and result.get('objects'):
+        # Return the first organization ID found
+        first_object_id = list(result['objects'].keys())[0]
+        org_id = first_object_id.split('::')[1]
+        logger.info(f"Found organization '{org_name}' with ID: {org_id}")
+        return org_id
+    
+    # Try with wildcard search if exact match fails
+    oql_query = f"SELECT Organization WHERE name LIKE '%{org_name}%'"
+    result = call_itop_api(
+        operation='core/get',
+        class_name='Organization',
+        key=oql_query
+    )
+    
+    if result and result.get('code') == 0 and result.get('objects'):
+        # Return the first organization ID found
+        first_object_id = list(result['objects'].keys())[0]
+        org_id = first_object_id.split('::')[1]
+        logger.info(f"Found organization matching '{org_name}' with ID: {org_id}")
+        return org_id
+    
+    logger.warning(f"Organization '{org_name}' not found in iTop and no hardcoded ID available")
+    return ""
 
-# --- Process the CSV file ---
-log "INFO" "Processing CSV file: ${csv_file_path}"
 
-# Read header line (optional: validate it)
-IFS=',' read -r header < "$csv_file_path"
-log "DEBUG" "CSV Header: $header"
-expected_header="FQDN,IP_Address,AO_Branch,AO_Application,OS_Name,OS_Version,CPU,Memory,Provisioned_Storage,Used_Storage"
-if [[ "$header" != "$expected_header" ]]; then
-    log "WARN" "CSV header does not exactly match expected format."
-    log "WARN" "Expected: $expected_header"
-    log "WARN" "Got:      $header"
-    log "WARN" "Attempting to process anyway, assuming column order is correct."
-fi
+def get_os_family_id(os_name: str) -> str:
+    """
+    Get the ID of an OS family by name, using hardcoded values for known OS families.
+    """
+    # Check fallback IDs first for known OS families
+    if os_name in FALLBACK_IDS['os_families']:
+        logger.info(f"Using hardcoded ID for OS Family '{os_name}'")
+        return FALLBACK_IDS['os_families'][os_name]
+    
+    # For unknown OS families, attempt to find them in iTop
+    oql_query = f"SELECT OSFamily WHERE name = '{os_name}'"
+    result = call_itop_api(
+        operation='core/get',
+        class_name='OSFamily',
+        key=oql_query
+    )
+    
+    if result and result.get('objects'):
+        # Sort by ID and take the lowest
+        os_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
+        return str(min(os_ids))
+    
+    # Try partial match if exact match failed
+    oql_query = f"SELECT OSFamily WHERE name LIKE '%{os_name}%'"
+    result = call_itop_api(
+        operation='core/get',
+        class_name='OSFamily',
+        key=oql_query
+    )
+    
+    if result and result.get('objects'):
+        # Sort by ID and take the lowest
+        os_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
+        return str(min(os_ids))
+        
+    logger.warning(f"OS Family '{os_name}' not found in iTop and no hardcoded ID available")
+    return ""
 
-# Process data rows (skip header line with tail)
-# Use process substitution <(...) to read file line by line skipping header
-# Allows counters to persist outside the loop
-while IFS=',' read -r fqdn ip_address ao_branch ao_application os_name os_version cpu memory provisioned_storage used_storage || [[ -n "$fqdn" ]]; do
-    ((processed_count++))
 
-    # Trim whitespace (basic trim) - Important for names and IPs
-    fqdn=$(echo "$fqdn" | xargs)
-    ip_address=$(echo "$ip_address" | xargs)
-    os_name=$(echo "$os_name" | xargs)
-    os_version=$(echo "$os_version" | xargs)
-    cpu=$(echo "$cpu" | xargs)
-    memory=$(echo "$memory" | xargs)
-    provisioned_storage=$(echo "$provisioned_storage" | xargs)
+def get_os_version_id(os_version: str) -> str:
+    """
+    Get the ID of an OS version by name, or use hardcoded ID for specific versions.
+    """
+    # Check fallback IDs first for known OS versions (including 8.10)
+    if os_version in FALLBACK_IDS['os_versions']:
+        logger.info(f"Using hardcoded ID for OS Version '{os_version}'")
+        return FALLBACK_IDS['os_versions'][os_version]
+    
+    # For other versions, use dynamic lookup via OQL query
+    oql_query = f"SELECT OSVersion WHERE name = '{os_version}'"
+    result = call_itop_api(
+        operation='core/get',
+        class_name='OSVersion',
+        key=oql_query
+    )
+    
+    if result and result.get('objects'):
+        # Sort by ID and take the lowest
+        version_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
+        return str(min(version_ids))
+        
+    # Try partial match if exact match failed
+    oql_query = f"SELECT OSVersion WHERE name LIKE '%{os_version}%'"
+    result = call_itop_api(
+        operation='core/get',
+        class_name='OSVersion',
+        key=oql_query
+    )
+    
+    if result and result.get('objects'):
+        # Sort by ID and take the lowest
+        version_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
+        return str(min(version_ids))
+    
+    logger.warning(f"OS Version '{os_version}' not found in iTop and no hardcoded ID available")
+    return ""
+    
 
-    # Skip blank lines or lines without FQDN
-    if [[ -z "$fqdn" ]]; then
-        log "WARN" "Skipping row ${processed_count}: FQDN is empty."
-        continue
-    fi
+    
 
-    log "INFO" "--- Processing Row ${processed_count}: FQDN=${fqdn}, IP=${ip_address} ---"
+    
 
-    # 1. Verify FQDN-IP match
-    if ! verify_fqdn_ip_match "$fqdn" "$ip_address"; then
-        ((skipped_dns_mismatch++))
-        continue # Skip this server
-    fi
-    log "INFO" "DNS verification successful for ${fqdn} <-> ${ip_address}"
 
-    # 2. Check if server exists in iTop
-    search_result=$(search_itop "$fqdn" "$ip_address")
-    search_status=$?
-    if [[ $search_status -eq 0 ]]; then
-        # Found in iTop
-        ((skipped_already_exists++))
-        continue # Skip this server
-    elif [[ $search_status -ne 1 ]]; then
-        # API error during search
-        log "ERROR" "Skipping row ${processed_count} due to error searching iTop for ${fqdn}."
-        ((skipped_id_lookup_error++)) # Count as ID lookup error for simplicity
-        continue
-    fi
-    # Not found, proceed to creation logic
 
-    # 3. Gather information for creation
-    itop_class=$(determine_server_type "$fqdn")
-    itop_org_name=$(determine_organization_name "$fqdn")
-    log "INFO" "Determined Class: ${itop_class}, Organization Name: ${itop_org_name}"
+def verify_fqdn_ip_match(fqdn: str, ip: str) -> bool:
+    """Verify if the FQDN resolves to the given IP address"""
+    try:
+        # Try forward DNS lookup
+        resolved_ips = socket.gethostbyname_ex(fqdn)[2]
+        if ip in resolved_ips:
+            return True
+        
+        # Try reverse DNS lookup
+        hostname = socket.gethostbyaddr(ip)[0]
+        return hostname.lower() == fqdn.lower()
+    except (socket.gaierror, socket.herror):
+        # DNS resolution failed
+        logger.warning(f"DNS resolution failed for {fqdn} - {ip}")
+        return False
 
-    # Get IDs from iTop
-    org_id=$(get_itop_id "Organization" "Organization" "$itop_org_name")
-    if [[ $? -ne 0 ]]; then ((skipped_id_lookup_error++)); continue; fi
 
-    osfamily_id=$(get_itop_id "OS Family" "OSFamily" "$os_name")
-    if [[ $? -ne 0 ]]; then ((skipped_id_lookup_error++)); continue; fi
+def determine_server_type(fqdn: str) -> str:
+    """Determine if the machine is a Server or VirtualMachine based on FQDN"""
+    if any(domain in fqdn.lower() for domain in ["ctho.asbn", "adu.dcn"]):
+        return "Server"
+    return "VirtualMachine"
 
-    osversion_id=$(get_itop_id "OS Version" "OSVersion" "$os_version")
-    if [[ $? -ne 0 ]]; then ((skipped_id_lookup_error++)); continue; fi
 
-    log "INFO" "Retrieved IDs - Org: ${org_id}, OS Family: ${osfamily_id}, OS Version: ${osversion_id}"
+def determine_organization(fqdn: str) -> str:
+    """Determine the organization based on FQDN"""
+    fqdn_lower = fqdn.lower()
+    
+    for org_name, domains in ORG_MAPPING.items():
+        if any(domain in fqdn_lower for domain in domains):
+            return org_name
+    
+    return "CMSO"  # Default organization
 
-    # 4. Prepare fields and create machine
-    # Map CSV fields to iTop fields using the retrieved IDs
-    fields_json=$(jq -n \
-        --arg name "$fqdn" \
-        --arg org_id "$org_id" \
-        --arg managementip "$ip_address" \
-        --arg osfamily_id "$osfamily_id" \
-        --arg osversion_id "$osversion_id" \
-        --arg cpu "$cpu" \
-        --arg ram "$memory" \
-        --arg diskspace "$provisioned_storage" \
-        '{
-            "name": $name,
-            "org_id": $org_id,
-            "managementip": $managementip,
-            "osfamily_id": $osfamily_id,
-            "osversion_id": $osversion_id,
-            "cpu": $cpu,
-            "ram": $ram,
-            "diskspace": $diskspace
-        }')
 
-    if ! create_itop_server "$itop_class" "$fields_json"; then
-        ((skipped_creation_error++))
-    else
-        ((created_count++))
-    fi
+def process_csv(csv_file_path: str) -> None:
+    """Process the CSV file and import servers into iTop"""
+    skipped_count = 0
+    created_count = 0
+    already_exists_count = 0
+    
+    with open(csv_file_path, 'r', newline='') as csvfile:
+        reader = csv.DictReader(csvfile)
+        
+        # Validate CSV headers
+        expected_headers = ['FQDN', 'IP_Address', 'AO_Branch', 'AO_Application', 
+                           'OS_Name', 'OS_Version', 'CPU', 'Memory', 
+                           'Provisioned_Storage', 'Used_Storage']
+        if reader.fieldnames != expected_headers:
+            logger.error(f"CSV headers do not match expected format: {expected_headers}")
+            sys.exit(1)
+        
+        # Process each row
+        for row in reader:
+            fqdn = row['FQDN'].strip()
+            ip = row['IP_Address'].strip()
+            
+            # Step 1: Verify FQDN-IP match
+            if not verify_fqdn_ip_match(fqdn, ip):
+                logger.warning(f"FQDN-IP mismatch: {fqdn} - {ip}, skipping")
+                skipped_count += 1
+                continue
+            
+            # Step 2: Check if server exists in iTop
+            existing_server = search_itop(fqdn, ip)
+            
+            if existing_server:
+                logger.info(f"Server {fqdn} already exists in iTop, skipping")
+                already_exists_count += 1
+                continue
+            
+            # Step 3: Create server in iTop
+            server_type = determine_server_type(fqdn)
+            organization = determine_organization(fqdn)
+            logger.info(f"Determined organization: {organization} for {fqdn}")
+            org_id = get_organization_id(organization)
+            
+            logger.info(f"Using OS Name: {row['OS_Name']} for {fqdn}")
+            os_family_id = get_os_family_id(row['OS_Name'])
+            
+            logger.info(f"Using OS Version: {row['OS_Version']} for {fqdn}")
+            os_version_id = get_os_version_id(row['OS_Version'])
+            
+            logger.info(f"Retrieved IDs - Org: {org_id}, OS Family: {os_family_id}, OS Version: {os_version_id}")
+            
+            if not org_id:
+                logger.error(f"Failed to get organization ID for {organization}, skipping {fqdn}")
+                skipped_count += 1
+                continue
+            
+            if not os_family_id:
+                logger.error(f"Failed to get OS Family ID for {row['OS_Name']}, skipping {fqdn}")
+                skipped_count += 1
+                continue
+            
+            if not os_version_id:
+                logger.error(f"Failed to get OS Version ID for {row['OS_Version']}, skipping {fqdn}")
+                skipped_count += 1
+                continue
+            
+            # Prepare data for iTop
+            server_data = {
+                'name': fqdn,
+                'org_id': org_id,
+                'managementip': ip,
+                'osfamily_id': os_family_id,
+                'osversion_id': os_version_id,
+                'cpu': row['CPU'],
+                'ram': row['Memory'],
+                'diskspace': row['Provisioned_Storage']
+            }
+            
+            # Log the data being sent to iTop for debugging
+            logger.info(f"Creating {server_type} with data: {json.dumps(server_data)}")
+            
+            # Create server in iTop
+            create_result = create_itop_server(server_type, server_data)
+            
+            if create_result and create_result.get('code') == 0:
+                logger.info(f"Successfully created {server_type} {fqdn} in iTop")
+                created_count += 1
+            else:
+                error_msg = create_result.get('message', 'Unknown error') if create_result else 'API call failed'
+                logger.error(f"Failed to create {server_type} {fqdn} in iTop: {error_msg}")
+                skipped_count += 1
+    
+    # Report summary
+    logger.info(f"Import complete: {created_count} servers created, {already_exists_count} already exist, {skipped_count} skipped")
 
-done < <(tail -n +2 "$csv_file_path") # Read from 2nd line onwards
 
-# --- Report Summary ---
-log "INFO" "==================== Import Summary ===================="
-log "INFO" "Total rows processed (excluding header): ${processed_count}"
-log "INFO" "Servers CREATED: ${created_count}"
-log "INFO" "Servers SKIPPED (Already Exists): ${skipped_already_exists}"
-log "INFO" "Servers SKIPPED (DNS Mismatch/Error): ${skipped_dns_mismatch}"
-log "INFO" "Servers SKIPPED (ID Lookup Error): ${skipped_id_lookup_error}"
-log "INFO" "Servers SKIPPED (Creation API Error): ${skipped_creation_error}"
-log "INFO" "========================================================"
-log "INFO" "Log file: ${LOG_FILE}"
-log "INFO" "Script finished."
+def test_itop_connection():
+    """Test the connection to iTop"""
+    logger.info("Testing connection to iTop server...")
+    try:
+        # Try list_operations first - this is the simplest operation that doesn't require class parameters
+        result = call_itop_api(operation='list_operations')
+        
+        if result and result.get('code') == 0:
+            logger.info(f"Successfully connected to iTop! Available operations: {len(result.get('operations', []))}")
+            logger.debug(f"Available operations: {[op.get('verb') for op in result.get('operations', [])]}")
+            return True
+            
+        # Fallback to a simple query if list_operations is not available
+        if not result or result.get('code') != 0:
+            logger.debug("Trying fallback connection test with Organization query")
+            result = call_itop_api(
+                operation='core/get',
+                class_name='Organization',
+                key="SELECT Organization LIMIT 1"
+            )
+            
+            if result and result.get('code') == 0:
+                logger.info("Successfully connected to iTop using Organization query!")
+                return True
+                
+        # If we get here, both connection tests failed
+        logger.error(f"Failed to connect to iTop: {result.get('message') if result else 'No response'}")
+        return False
+    except Exception as e:
+        logger.exception(f"Connection test failed: {e}")
+        return False
 
-exit 0
+def main():
+    """Main function"""
+    # Warning about disabled SSL verification
+    logger.warning("SSL certificate verification is disabled. This is insecure and should only be used in test environments.")
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <csv_file_path>")
+        sys.exit(1)
+    
+    csv_file_path = sys.argv[1]
+    
+    try:
+        # Log important configuration
+        logger.info(f"Using iTop REST API at: {ITOP_API_ENDPOINT}")
+        logger.info(f"API version: {ITOP_VERSION}")
+        logger.info(f"Using username: {ITOP_USER}")
+        
+        # Test connection first using the new API structure
+        if test_itop_connection():
+            # Process CSV using the new API functions
+            process_csv(csv_file_path)
+        else:
+            logger.error("Unable to continue due to iTop connection issues")
+            sys.exit(1)
+        
+    except Exception as e:
+        logger.exception(f"An error occurred: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
