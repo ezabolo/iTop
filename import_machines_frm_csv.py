@@ -133,8 +133,14 @@ class iTopAPI:
         return response.json()
     
     def get_os_family_id(self, os_name: str) -> str:
-        """Get the ID of an OS family by name, selecting the lowest ID if multiple exist"""
-        # Try exact match first
+        """Get the ID of an OS family by name, using hardcoded values for known OS families"""
+        # Check fallback IDs first for known OS families
+        if os_name in FALLBACK_IDS['os_families']:
+            logger.info(f"Using hardcoded ID for OS Family '{os_name}'")
+            return FALLBACK_IDS['os_families'][os_name]
+        
+        # For unknown OS families, attempt to find them in iTop
+        # Try exact match
         result = self.search('OSFamily', {'name': os_name})
         
         if 'objects' in result and result['objects']:
@@ -149,18 +155,18 @@ class iTopAPI:
             # Sort by ID and take the lowest
             os_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
             return str(min(os_ids))
-        
-        # Check fallback IDs
-        if os_name in FALLBACK_IDS['os_families']:
-            logger.info(f"Using fallback ID for OS Family '{os_name}'")
-            return FALLBACK_IDS['os_families'][os_name]
             
-        logger.warning(f"OS Family '{os_name}' not found in iTop")
+        logger.warning(f"OS Family '{os_name}' not found in iTop and no hardcoded ID available")
         return ""
     
     def get_os_version_id(self, os_version: str) -> str:
         """Get the ID of an OS version by name, or use hardcoded ID for specific versions"""
-        # Special case for version 8.10 as requested
+        # Check fallback IDs first for known OS versions
+        if os_version in FALLBACK_IDS['os_versions']:
+            logger.info(f"Using hardcoded ID for OS Version '{os_version}'")
+            return FALLBACK_IDS['os_versions'][os_version]
+        
+        # Special case for version 8.10 as requested (redundant since it's in fallbacks but kept for clarity)
         if os_version == "8.10":
             logger.info(f"Using specified ID 211 for OS Version '{os_version}'")
             return "211"
@@ -181,18 +187,19 @@ class iTopAPI:
             # Sort by ID and take the lowest
             version_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
             return str(min(version_ids))
-            
-        # Check fallback IDs for any other hardcoded versions
-        if os_version in FALLBACK_IDS['os_versions']:
-            logger.info(f"Using fallback ID for OS Version '{os_version}'")
-            return FALLBACK_IDS['os_versions'][os_version]
         
-        logger.warning(f"OS Version '{os_version}' not found in iTop")
+        logger.warning(f"OS Version '{os_version}' not found in iTop and no hardcoded ID available")
         return ""
     
     def get_organization_id(self, org_name: str) -> str:
-        """Get the ID of an organization by name"""
-        # Try exact match first
+        """Get the ID of an organization by name, using hardcoded values for known organizations"""
+        # Check fallback IDs first for known organizations
+        if org_name in FALLBACK_IDS['organizations']:
+            logger.info(f"Using hardcoded ID for Organization '{org_name}'")
+            return FALLBACK_IDS['organizations'][org_name]
+            
+        # For unknown organizations, attempt to find them in iTop
+        # Try exact match
         result = self.search('Organization', {'name': org_name})
         
         if 'objects' in result and result['objects']:
@@ -205,13 +212,8 @@ class iTopAPI:
         if 'objects' in result and result['objects']:
             # Return the first organization ID found
             return list(result['objects'].keys())[0].split('::')[1]
-            
-        # Check fallback IDs
-        if org_name in FALLBACK_IDS['organizations']:
-            logger.info(f"Using fallback ID for Organization '{org_name}'")
-            return FALLBACK_IDS['organizations'][org_name]
         
-        logger.warning(f"Organization '{org_name}' not found in iTop")
+        logger.warning(f"Organization '{org_name}' not found in iTop and no hardcoded ID available")
         return ""
 
 
@@ -289,9 +291,16 @@ def process_csv(csv_file_path: str, itop_api: iTopAPI) -> None:
             
             # Step 3: Create server in iTop
             organization = determine_organization(fqdn)
+            logger.info(f"Determined organization: {organization} for {fqdn}")
             org_id = itop_api.get_organization_id(organization)
+            
+            logger.info(f"Using OS Name: {row['OS_Name']} for {fqdn}")
             os_family_id = itop_api.get_os_family_id(row['OS_Name'])
+            
+            logger.info(f"Using OS Version: {row['OS_Version']} for {fqdn}")
             os_version_id = itop_api.get_os_version_id(row['OS_Version'])
+            
+            logger.info(f"Retrieved IDs - Org: {org_id}, OS Family: {os_family_id}, OS Version: {os_version_id}")
             
             if not org_id:
                 logger.error(f"Failed to get organization ID for {organization}, skipping {fqdn}")
