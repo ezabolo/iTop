@@ -22,7 +22,7 @@ requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Change to DEBUG for more verbose output
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("itop_import.log"),
@@ -32,9 +32,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # iTop API configuration
-ITOP_URL = "http://your-itop-instance/webservices/rest.php"
+ITOP_URL = "https://my-itop.example.com/itop/weservices/rest.php"
 ITOP_USER = "admin"
 ITOP_PWD = "password"  # Consider using environment variables for credentials
+ITOP_VERSION = "1.3"  # iTop API version
 
 # Fallback IDs for common entities when search fails
 FALLBACK_IDS = {
@@ -60,14 +61,20 @@ ORG_MAPPING = {
 class iTopAPI:
     """Class for interacting with the iTop REST API"""
     
-    def __init__(self, url: str, username: str, password: str):
+    def __init__(self, url: str, username: str, password: str, version: str = "1.3"):
         self.url = url
         self.username = username
         self.password = password
+        self.version = version
         self.auth_params = {
             'auth_user': username,
             'auth_pwd': password,
+            'version': version,
         }
+        # Ensure warnings about insecure requests are suppressed
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        logger.info(f"Initialized iTopAPI with URL: {url}, version: {version}")
         
     def search(self, object_type: str, query: Dict) -> Dict:
         """Search for objects in iTop based on query criteria"""
@@ -77,7 +84,7 @@ class iTopAPI:
             if isinstance(value, str) and '%' in value:
                 using_like = True
                 break
-                
+        
         operation = 'core/get'
         if using_like:
             # Use OQL for LIKE queries
@@ -95,7 +102,8 @@ class iTopAPI:
             key = f"SELECT {object_type} WHERE {oql_where}"
         else:
             key = query
-            
+        
+        # Format like curl would - POST with json_data as a parameter    
         json_data = {
             'operation': operation,
             'class': object_type,
@@ -103,15 +111,31 @@ class iTopAPI:
             'output_fields': 'id, name, managementip',
         }
         
-        params = {**self.auth_params, 'json_data': json.dumps(json_data)}
-        # SSL verification disabled as requested
-        response = requests.get(self.url, params=params, verify=False)
+        # Debug the JSON data being sent
+        logger.debug(f"Search query for {object_type}: {json.dumps(json_data, indent=2)}")
         
-        if response.status_code != 200:
-            logger.error(f"Error searching iTop: {response.text}")
+        # Use POST with form data like curl would
+        form_data = {**self.auth_params, 'json_data': json.dumps(json_data)}
+        
+        try:
+            # SSL verification explicitly disabled as requested
+            headers = {'User-Agent': 'Python iTop Client'}
+            response = requests.post(self.url, data=form_data, headers=headers, verify=False)
+            
+            logger.debug(f"Response status: {response.status_code}")
+            logger.debug(f"Response headers: {response.headers}")
+            
+            if response.status_code != 200:
+                logger.error(f"Error searching iTop: {response.text}")
+                return {"objects": {}}
+            
+            result = response.json()
+            logger.debug(f"Search result: {json.dumps(result, indent=2)}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Exception during iTop search: {str(e)}")
             return {"objects": {}}
-        
-        return response.json()
     
     def create(self, object_type: str, data: Dict) -> Dict:
         """Create a new object in iTop"""
@@ -122,15 +146,31 @@ class iTopAPI:
             'comment': 'Created via CSV import script',
         }
         
-        params = {**self.auth_params, 'json_data': json.dumps(json_data)}
-        # SSL verification disabled as requested
-        response = requests.post(self.url, params=params, verify=False)
+        # Debug the JSON data being sent
+        logger.debug(f"Create request for {object_type}: {json.dumps(json_data, indent=2)}")
         
-        if response.status_code != 200:
-            logger.error(f"Error creating object in iTop: {response.text}")
-            return {"code": 99, "message": response.text}
+        # Use POST with form data like curl would
+        form_data = {**self.auth_params, 'json_data': json.dumps(json_data)}
         
-        return response.json()
+        try:
+            # SSL verification explicitly disabled as requested
+            headers = {'User-Agent': 'Python iTop Client'}
+            response = requests.post(self.url, data=form_data, headers=headers, verify=False)
+            
+            logger.debug(f"Response status: {response.status_code}")
+            logger.debug(f"Response headers: {response.headers}")
+            
+            if response.status_code != 200:
+                logger.error(f"Error creating object in iTop: {response.text}")
+                return {"code": 99, "message": response.text}
+            
+            result = response.json()
+            logger.debug(f"Create result: {json.dumps(result, indent=2)}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Exception during iTop create: {str(e)}")
+            return {"code": 99, "message": str(e)}
     
     def get_os_family_id(self, os_name: str) -> str:
         """Get the ID of an OS family by name, using hardcoded values for known OS families"""
@@ -346,6 +386,23 @@ def process_csv(csv_file_path: str, itop_api: iTopAPI) -> None:
     logger.info(f"Import complete: {created_count} servers created, {already_exists_count} already exist, {skipped_count} skipped")
 
 
+def test_itop_connection(itop_api):
+    """Test the connection to iTop"""
+    logger.info("Testing connection to iTop server...")
+    try:
+        # Try a simple query to test the connection
+        result = itop_api.search('Organization', {'id': '1'})
+        logger.info(f"Connection test result: {result}")
+        if 'objects' in result:
+            logger.info("Successfully connected to iTop!")
+            return True
+        else:
+            logger.error("Failed to connect to iTop properly")
+            return False
+    except Exception as e:
+        logger.exception(f"Connection test failed: {e}")
+        return False
+
 def main():
     """Main function"""
     # Warning about disabled SSL verification
@@ -357,11 +414,16 @@ def main():
     csv_file_path = sys.argv[1]
     
     try:
-        # Initialize iTop API
-        itop_api = iTopAPI(ITOP_URL, ITOP_USER, ITOP_PWD)
+        # Initialize iTop API with specified version
+        itop_api = iTopAPI(ITOP_URL, ITOP_USER, ITOP_PWD, ITOP_VERSION)
         
-        # Process CSV
-        process_csv(csv_file_path, itop_api)
+        # Test connection first
+        if test_itop_connection(itop_api):
+            # Process CSV
+            process_csv(csv_file_path, itop_api)
+        else:
+            logger.error("Unable to continue due to iTop connection issues")
+            sys.exit(1)
         
     except Exception as e:
         logger.exception(f"An error occurred: {e}")
