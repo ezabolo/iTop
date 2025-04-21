@@ -1,224 +1,264 @@
+#!/usr/bin/env python3
+"""
+iTop Server Import Tool
+
+This script reads server information from a CSV file and imports it into iTop.
+It verifies FQDN-IP matches and checks if servers already exist in iTop before creating them.
+"""
+
 import csv
-import os
-import socket
-import requests
-import logging
-import urllib3
-import json
 import sys
+import json
+import dns.resolver
+import requests
+import socket
+import logging
+from typing import Dict, List, Tuple, Optional
 
-# Suppress SSL warnings if verify=False is used
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("itop_import.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
-# Environment variables for iTop API
-ITOP_API_URL = os.getenv('ITOP_API_URL', '[https://myitop.example.com/itop/webservices/rest.php')](https://myitop.example.com/itop/webservices/rest.php'))
-ITOP_API_USER = os.getenv('ITOP_API_USER', '')
-ITOP_API_PASSWORD = os.getenv('ITOP_API_PASSWORD', '')
+# iTop API configuration
+ITOP_URL = "http://your-itop-instance/webservices/rest.php"
+ITOP_USER = "admin"
+ITOP_PWD = "password"  # Consider using environment variables for credentials
 
-# Logging setup
-logging.basicConfig(filename='itop_import_log.txt', level=logging.INFO, 
-                   format='%(asctime)s %(levelname)s:%(message)s')
+# Organization mapping
+ORG_MAPPING = {
+    "CTHO": {"ctho.asbn", "adu.dcn"},
+    "CMSO": set()  # Default organization
+}
 
-def fqdn_matches_ip(fqdn, ip):
-    try:
-        resolved_ip = socket.gethostbyname(fqdn)
-        return resolved_ip == ip
-    except Exception as e:
-        logging.error(f"DNS resolution failed for {fqdn}: {e}")
-        return False
-
-def itop_api_request(operation, class_name=None, key=None, output_fields=None, 
-                   filter_criteria=None, data=None):
-    """
-    Make a request to iTop REST API 1.3
+class iTopAPI:
+    """Class for interacting with the iTop REST API"""
     
-    :param operation: 'core/get', 'core/create', 'core/update', etc.
-    :param class_name: The class of objects to work with
-    :param key: For operations that require an object key
-    :param output_fields: Fields to output for 'get' operations
-    :param filter_criteria: Filter criteria for 'get' operations
-    :param data: Data for 'create' or 'update' operations
-    :return: JSON response
-    """
-    payload = {
-        'operation': operation,
-        'version': '1.3',
-        'auth_user': ITOP_API_USER,
-        'auth_pwd': ITOP_API_PASSWORD,
-    }
-    
-    if class_name:
-        payload['class'] = class_name
-    
-    if key:
-        payload['key'] = key
+    def __init__(self, url: str, username: str, password: str):
+        self.url = url
+        self.username = username
+        self.password = password
+        self.auth_params = {
+            'auth_user': username,
+            'auth_pwd': password,
+        }
         
-    if output_fields:
-        payload['output_fields'] = output_fields
+    def search(self, object_type: str, query: Dict) -> Dict:
+        """Search for objects in iTop based on query criteria"""
+        json_data = {
+            'operation': 'core/get',
+            'class': object_type,
+            'key': query,
+            'output_fields': 'id, name, managementip',
+        }
         
-    if filter_criteria:
-        payload['filter'] = filter_criteria
+        params = {**self.auth_params, 'json_data': json.dumps(json_data)}
+        response = requests.get(self.url, params=params)
         
-    if data:
-        payload['fields'] = data
-    
-    try:
-        response = requests.post(
-            ITOP_API_URL, 
-            data={'json_data': json.dumps(payload)},
-            verify=False  # Skip SSL verification - remove in production if possible
-        )
-        response.raise_for_status()
+        if response.status_code != 200:
+            logger.error(f"Error searching iTop: {response.text}")
+            return {"objects": {}}
+        
         return response.json()
-    except Exception as e:
-        logging.error(f"API request failed: {e}")
-        if hasattr(response, 'text'):
-            logging.error(f"Response: {response.text}")
-        raise
-
-def check_exists_in_itop(fqdn, ip):
-    """Check if server or VM exists in iTop by FQDN or IP"""
-    # Check in Server class
-    server_filter = f"SELECT Server WHERE name = '{fqdn}' OR managementip = '{ip}'"
-    resp = itop_api_request('core/get', 'Server', filter_criteria=server_filter)
     
-    if resp.get('objects') and len(resp.get('objects', {})) > 0:
-        return True
+    def create(self, object_type: str, data: Dict) -> Dict:
+        """Create a new object in iTop"""
+        json_data = {
+            'operation': 'core/create',
+            'class': object_type,
+            'fields': data,
+            'comment': 'Created via CSV import script',
+        }
         
-    # Check in VirtualMachine class
-    vm_filter = f"SELECT VirtualMachine WHERE name = '{fqdn}' OR managementip = '{ip}'"
-    resp = itop_api_request('core/get', 'VirtualMachine', filter_criteria=vm_filter)
-    
-    return resp.get('objects') and len(resp.get('objects', {})) > 0
-
-def get_lowest_id(class_name, field_name, field_value):
-    """Get the lowest ID from a list of matching objects"""
-    query = f"SELECT {class_name} WHERE {field_name} = '{field_value}'"
-    resp = itop_api_request('core/get', class_name, filter_criteria=query)
-    
-    if not resp.get('objects'):
-        logging.warning(f"No {class_name} found with {field_name}='{field_value}'")
-        return None
+        params = {**self.auth_params, 'json_data': json.dumps(json_data)}
+        response = requests.post(self.url, params=params)
         
-    # Extract IDs and find the lowest
-    ids = []
-    for obj_key, obj_data in resp.get('objects', {}).items():
-        try:
-            # Extract the ID part from the key (format is usually "ClassName::ID")
-            id_part = obj_key.split('::')[1]
-            ids.append(int(id_part))
-        except (IndexError, ValueError) as e:
-            logging.error(f"Failed to parse ID from {obj_key}: {e}")
-    
-    if not ids:
-        return None
+        if response.status_code != 200:
+            logger.error(f"Error creating object in iTop: {response.text}")
+            return {"code": 99, "message": response.text}
         
-    return min(ids)
-
-def create_machine_in_itop(class_name, machine_data):
-    """Create a new machine in iTop"""
-    resp = itop_api_request('core/create', class_name, data=machine_data)
+        return response.json()
     
-    if resp.get('code') != 0:
-        error_msg = resp.get('message', 'Unknown error')
-        logging.error(f"Failed to create {class_name}: {error_msg}")
+    def get_os_family_id(self, os_name: str) -> str:
+        """Get the ID of an OS family by name, selecting the lowest ID if multiple exist"""
+        result = self.search('OSFamily', {'name': os_name})
+        
+        if 'objects' in result and result['objects']:
+            # Sort by ID and take the lowest
+            os_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
+            return str(min(os_ids))
+        
+        logger.warning(f"OS Family '{os_name}' not found in iTop")
+        return ""
+    
+    def get_os_version_id(self, os_version: str) -> str:
+        """Get the ID of an OS version by name, selecting the lowest ID if multiple exist"""
+        result = self.search('OSVersion', {'name': os_version})
+        
+        if 'objects' in result and result['objects']:
+            # Sort by ID and take the lowest
+            version_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
+            return str(min(version_ids))
+        
+        logger.warning(f"OS Version '{os_version}' not found in iTop")
+        return ""
+    
+    def get_organization_id(self, org_name: str) -> str:
+        """Get the ID of an organization by name"""
+        result = self.search('Organization', {'name': org_name})
+        
+        if 'objects' in result and result['objects']:
+            # Return the first organization ID found
+            return list(result['objects'].keys())[0].split('::')[1]
+        
+        logger.warning(f"Organization '{org_name}' not found in iTop")
+        return ""
+
+
+def verify_fqdn_ip_match(fqdn: str, ip: str) -> bool:
+    """Verify if the FQDN resolves to the given IP address"""
+    try:
+        # Try forward DNS lookup
+        resolved_ips = socket.gethostbyname_ex(fqdn)[2]
+        if ip in resolved_ips:
+            return True
+        
+        # Try reverse DNS lookup
+        hostname = socket.gethostbyaddr(ip)[0]
+        return hostname.lower() == fqdn.lower()
+    except (socket.gaierror, socket.herror):
+        # DNS resolution failed
+        logger.warning(f"DNS resolution failed for {fqdn} - {ip}")
         return False
-        
-    return True
 
-def main(csv_filename):
-    if not os.path.exists(csv_filename):
-        logging.error(f"CSV file not found: {csv_filename}")
-        print(f"Error: CSV file not found: {csv_filename}")
-        return
+
+def determine_server_type(fqdn: str) -> str:
+    """Determine if the machine is a Server or VirtualMachine based on FQDN"""
+    if any(domain in fqdn.lower() for domain in ["ctho.asbn", "adu.dcn"]):
+        return "Server"
+    return "VirtualMachine"
+
+
+def determine_organization(fqdn: str) -> str:
+    """Determine the organization based on FQDN"""
+    fqdn_lower = fqdn.lower()
+    
+    for org_name, domains in ORG_MAPPING.items():
+        if any(domain in fqdn_lower for domain in domains):
+            return org_name
+    
+    return "CMSO"  # Default organization
+
+
+def process_csv(csv_file_path: str, itop_api: iTopAPI) -> None:
+    """Process the CSV file and import servers into iTop"""
+    skipped_count = 0
+    created_count = 0
+    already_exists_count = 0
+    
+    with open(csv_file_path, 'r', newline='') as csvfile:
+        reader = csv.DictReader(csvfile)
         
-    logging.info(f"Starting import from {csv_filename}")
+        # Validate CSV headers
+        expected_headers = ['FQDN', 'IP_Address', 'AO_Branch', 'AO_Application', 
+                           'OS_Name', 'OS_Version', 'CPU', 'Memory', 
+                           'Provisioned_Storage', 'Used_Storage']
+        if reader.fieldnames != expected_headers:
+            logger.error(f"CSV headers do not match expected format: {expected_headers}")
+            sys.exit(1)
+        
+        # Process each row
+        for row in reader:
+            fqdn = row['FQDN'].strip()
+            ip = row['IP_Address'].strip()
+            
+            # Step 1: Verify FQDN-IP match
+            if not verify_fqdn_ip_match(fqdn, ip):
+                logger.warning(f"FQDN-IP mismatch: {fqdn} - {ip}, skipping")
+                skipped_count += 1
+                continue
+            
+            # Step 2: Check if server exists in iTop
+            server_type = determine_server_type(fqdn)
+            search_result = itop_api.search(server_type, {'name': fqdn})
+            
+            if search_result.get('objects'):
+                logger.info(f"Server {fqdn} already exists in iTop, skipping")
+                already_exists_count += 1
+                continue
+            
+            # Step 3: Create server in iTop
+            organization = determine_organization(fqdn)
+            org_id = itop_api.get_organization_id(organization)
+            os_family_id = itop_api.get_os_family_id(row['OS_Name'])
+            os_version_id = itop_api.get_os_version_id(row['OS_Version'])
+            
+            if not org_id:
+                logger.error(f"Failed to get organization ID for {organization}, skipping {fqdn}")
+                skipped_count += 1
+                continue
+            
+            if not os_family_id:
+                logger.error(f"Failed to get OS Family ID for {row['OS_Name']}, skipping {fqdn}")
+                skipped_count += 1
+                continue
+            
+            if not os_version_id:
+                logger.error(f"Failed to get OS Version ID for {row['OS_Version']}, skipping {fqdn}")
+                skipped_count += 1
+                continue
+            
+            # Prepare data for iTop
+            server_data = {
+                'name': fqdn,
+                'org_id': org_id,
+                'managementip': ip,
+                'osfamily_id': os_family_id,
+                'osversion_id': os_version_id,
+                'cpu': row['CPU'],
+                'ram': row['Memory'],
+                'diskspace': row['Provisioned_Storage']
+            }
+            
+            # Create server in iTop
+            create_result = itop_api.create(server_type, server_data)
+            
+            if create_result.get('code') == 0:
+                logger.info(f"Successfully created {server_type} {fqdn} in iTop")
+                created_count += 1
+            else:
+                logger.error(f"Failed to create {server_type} {fqdn} in iTop: {create_result.get('message')}")
+                skipped_count += 1
+    
+    # Report summary
+    logger.info(f"Import complete: {created_count} servers created, {already_exists_count} already exist, {skipped_count} skipped")
+
+
+def main():
+    """Main function"""
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <csv_file_path>")
+        sys.exit(1)
+    
+    csv_file_path = sys.argv[1]
     
     try:
-        with open(csv_filename, newline='') as csvfile:
-            reader = csv.DictReader(csvfile)
-            
-            # Verify CSV header
-            expected_headers = [
-                'FQDN', 'IP_Address', 'AO_Branch', 'AO_Application', 
-                'OS_NAME', 'OS_version', 'CPU', 'Memory', 
-                'Provisioned_storage', 'Used_storage'
-            ]
-            
-            if reader.fieldnames != expected_headers:
-                logging.error(f"CSV headers do not match expected format: {reader.fieldnames}")
-                print("Error: CSV headers do not match expected format")
-                return
-                
-            for row in reader:
-                fqdn = row['FQDN']
-                ip = row['IP_Address']
-                
-                # Step 1: Verify FQDN matches IP
-                if not fqdn_matches_ip(fqdn, ip):
-                    msg = f"FQDN/IP mismatch: {fqdn} <-> {ip}, skipping"
-                    logging.warning(msg)
-                    print(msg)
-                    continue
-                    
-                # Step 2: Check if machine exists in iTop
-                if check_exists_in_itop(fqdn, ip):
-                    msg = f"Machine already exists in iTop: {fqdn} ({ip}), skipping"
-                    logging.info(msg)
-                    print(msg)
-                    continue
-                    
-                # Step 3: Determine class and organization based on FQDN
-                if 'ctho.asbn' in fqdn.lower() or 'adu.dcn' in fqdn.lower():
-                    class_name = 'Server'
-                    org_name = 'CTHO'
-                else:
-                    class_name = 'VirtualMachine'
-                    org_name = 'CMSO'
-                    
-                # Step 4: Get required IDs
-                org_id = get_lowest_id('Organization', 'name', org_name)
-                os_family_id = get_lowest_id('OSFamily', 'name', row['OS_NAME'])
-                os_version_id = get_lowest_id('OSVersion', 'name', row['OS_version'])
-                
-                if not all([org_id, os_family_id, os_version_id]):
-                    msg = f"Missing required IDs for {fqdn}, skipping"
-                    logging.error(msg)
-                    print(msg)
-                    continue
-                    
-                # Step 5: Create machine in iTop
-                machine_data = {
-                    'name': fqdn,
-                    'managementip': ip,
-                    'org_id': org_id,
-                    'osfamily_id': os_family_id, 
-                    'osversion_id': os_version_id,
-                    'cpu': row['CPU'],
-                    'ram': row['Memory'],
-                    'diskspace': row['Provisioned_storage']
-                }
-                
-                try:
-                    if create_machine_in_itop(class_name, machine_data):
-                        msg = f"Successfully created {class_name} in iTop: {fqdn} ({ip})"
-                        logging.info(msg)
-                        print(msg)
-                    else:
-                        msg = f"Failed to create {class_name} in iTop: {fqdn} ({ip})"
-                        logging.error(msg)
-                        print(msg)
-                except Exception as e:
-                    msg = f"Error creating {class_name} in iTop for {fqdn}: {e}"
-                    logging.error(msg)
-                    print(msg)
-    
+        # Initialize iTop API
+        itop_api = iTopAPI(ITOP_URL, ITOP_USER, ITOP_PWD)
+        
+        # Process CSV
+        process_csv(csv_file_path, itop_api)
+        
     except Exception as e:
-        logging.error(f"Error processing CSV: {e}")
-        print(f"Error: {e}")
+        logger.exception(f"An error occurred: {e}")
+        sys.exit(1)
 
-if __name__ == '__main__':
-    if len(sys.argv) != 2:
-        print("Usage: python import_to_itop.py <csv_filename>")
-    else:
-        main(sys.argv[1])
+
+if __name__ == "__main__":
+    main()
