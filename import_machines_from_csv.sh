@@ -349,29 +349,15 @@ def get_os_version_id(os_version: str) -> str:
     
     logger.warning(f"OS Version '{os_version}' not found in iTop and no hardcoded ID available")
     return ""
-    
-
-    
-
-    
-
 
 
 def verify_fqdn_ip_match(fqdn: str, ip: str) -> bool:
-    """Verify if the FQDN resolves to the given IP address"""
-    try:
-        # Try forward DNS lookup
-        resolved_ips = socket.gethostbyname_ex(fqdn)[2]
-        if ip in resolved_ips:
-            return True
-        
-        # Try reverse DNS lookup
-        hostname = socket.gethostbyaddr(ip)[0]
-        return hostname.lower() == fqdn.lower()
-    except (socket.gaierror, socket.herror):
-        # DNS resolution failed
-        logger.warning(f"DNS resolution failed for {fqdn} - {ip}")
-        return False
+    """
+    DNS verification has been disabled - always returns True
+    """
+    # DNS verification has been disabled as requested
+    logger.info(f"DNS verification disabled - accepting {fqdn} - {ip} without verification")
+    return True
 
 
 def determine_server_type(fqdn: str) -> str:
@@ -414,7 +400,7 @@ def process_csv(csv_file_path: str) -> None:
             fqdn = row['FQDN'].strip()
             ip = row['IP_Address'].strip()
             
-            # Step 1: Verify FQDN-IP match
+            # Step 1: Verify FQDN-IP match - Always returns True now as DNS verification is disabled
             if not verify_fqdn_ip_match(fqdn, ip):
                 logger.warning(f"FQDN-IP mismatch: {fqdn} - {ip}, skipping")
                 skipped_count += 1
@@ -468,6 +454,27 @@ def process_csv(csv_file_path: str) -> None:
                 'ram': row['Memory'],
                 'diskspace': row['Provisioned_Storage']
             }
+            
+            # Add VirtualHost for VirtualMachine type only
+            if server_type == "VirtualMachine":
+                # Determine the correct VirtualHost based on name and OS
+                virtualhost_name = ""
+                is_windows = row['OS_Name'].lower() == "windows"
+                has_aocms = "aocms" in fqdn.lower()
+                
+                if has_aocms and is_windows:
+                    virtualhost_name = "CMSO-CMECF-W"
+                elif has_aocms and not is_windows:
+                    virtualhost_name = "CMSO-CMECF-E"
+                elif not has_aocms and not is_windows:
+                    virtualhost_name = "CMSO-PPS-E"
+                elif not has_aocms and is_windows:
+                    virtualhost_name = "CMSO-PPS-W"
+                
+                # Add virtualhost_id to server_data using OQL query
+                if virtualhost_name:
+                    logger.info(f"Using VirtualHost: {virtualhost_name} for {fqdn}")
+                    server_data['virtualhost_id'] = f"SELECT VirtualHost WHERE name = '{virtualhost_name}'"
             
             # Log the data being sent to iTop for debugging
             logger.info(f"Creating {server_type} with data: {json.dumps(server_data)}")
@@ -523,6 +530,7 @@ def main():
     """Main function"""
     # Warning about disabled SSL verification
     logger.warning("SSL certificate verification is disabled. This is insecure and should only be used in test environments.")
+    logger.warning("DNS verification has been disabled. Machine names and IPs are not being validated.")
     if len(sys.argv) != 2:
         print(f"Usage: {sys.argv[0]} <csv_file_path>")
         sys.exit(1)
