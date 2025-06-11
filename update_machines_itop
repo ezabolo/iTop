@@ -33,9 +33,20 @@ logger = logging.getLogger(__name__)
 
 # --- iTop API Functions ---
 
-def call_itop_api(url, username, password, operation, class_name, key=None, fields=None, version='1.3'):
+def call_itop_api(url, username, password, operation, class_name, key=None, fields=None, version='1.3', verify_ssl=True):
     """
     Helper function to make calls to the iTop REST API.
+    
+    Args:
+        url (str): iTop API URL
+        username (str): iTop username
+        password (str): iTop password
+        operation (str): API operation to perform
+        class_name (str): iTop class name
+        key: Search key or object ID
+        fields (dict): Fields to update
+        version (str): API version
+        verify_ssl (bool): Whether to verify SSL certificate
     """
     payload = {
         'version': version,
@@ -55,7 +66,7 @@ def call_itop_api(url, username, password, operation, class_name, key=None, fiel
     payload.update(auth_params)
     
     try:
-        response = requests.post(url, data=payload)
+        response = requests.post(url, data=payload, verify=verify_ssl)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -65,7 +76,7 @@ def call_itop_api(url, username, password, operation, class_name, key=None, fiel
         logger.error("Failed to decode JSON response from iTop")
         return None
 
-def search_machine_by_name(url, username, password, machine_type, name):
+def search_machine_by_name(url, username, password, machine_type, name, verify_ssl=True):
     """
     Search for a machine in iTop by name
     
@@ -75,6 +86,7 @@ def search_machine_by_name(url, username, password, machine_type, name):
         password (str): iTop password
         machine_type (str): Type of machine ('Server' or 'VirtualMachine')
         name (str): Machine name
+        verify_ssl (bool): Whether to verify SSL certificate
     
     Returns:
         dict: Machine data if found, None otherwise
@@ -90,7 +102,8 @@ def search_machine_by_name(url, username, password, machine_type, name):
         password=password,
         operation='core/get',
         class_name=machine_type,
-        key=oql_query
+        key=oql_query,
+        verify_ssl=verify_ssl
     )
     
     if result and 'objects' in result and result['objects']:
@@ -102,7 +115,7 @@ def search_machine_by_name(url, username, password, machine_type, name):
         logger.info(f"No {machine_type} found with name '{name}'")
         return None
 
-def update_machine(url, username, password, machine_type, machine_id, fields):
+def update_machine(url, username, password, machine_type, machine_id, fields, verify_ssl=True):
     """
     Update a machine in iTop
     
@@ -113,6 +126,7 @@ def update_machine(url, username, password, machine_type, machine_id, fields):
         machine_type (str): Type of machine ('Server' or 'VirtualMachine')
         machine_id (int): ID of the machine to update
         fields (dict): Fields to update
+        verify_ssl (bool): Whether to verify SSL certificate
             
     Returns:
         bool: True if successful, False otherwise
@@ -126,7 +140,8 @@ def update_machine(url, username, password, machine_type, machine_id, fields):
         operation='core/update',
         class_name=machine_type,
         key=machine_id,
-        fields=fields
+        fields=fields,
+        verify_ssl=verify_ssl
     )
     
     if result and 'code' in result and result['code'] == 0:
@@ -138,7 +153,7 @@ def update_machine(url, username, password, machine_type, machine_id, fields):
         return False
 
 
-def process_csv(file_path, url, username, password):
+def process_csv(file_path, url, username, password, verify_ssl=True):
     """
     Process the CSV file and update machines in iTop
     
@@ -147,6 +162,7 @@ def process_csv(file_path, url, username, password):
         url (str): iTop API URL
         username (str): iTop username
         password (str): iTop password
+        verify_ssl (bool): Whether to verify SSL certificate
         
     Returns:
         tuple: (processed, updated, skipped) counts
@@ -178,7 +194,7 @@ def process_csv(file_path, url, username, password):
                 logger.info(f"Processing {machine_type}: {name}")
                 
                 # Search for the machine in iTop
-                machine = search_machine_by_name(url, username, password, machine_type, name)
+                machine = search_machine_by_name(url, username, password, machine_type, name, verify_ssl)
                 
                 if not machine:
                     logger.info(f"Machine not found, skipping: {name}")
@@ -224,7 +240,7 @@ def process_csv(file_path, url, username, password):
                 
                 # Update the machine in iTop
                 if fields:
-                    success = update_machine(url, username, password, machine_type, machine['key'], fields)
+                    success = update_machine(url, username, password, machine_type, machine['key'], fields, verify_ssl)
                     if success:
                         updated += 1
                     else:
@@ -247,13 +263,20 @@ def main():
     parser.add_argument('--url', required=True, help='iTop REST API URL (e.g., https://itop.example.com/webservices/rest.php)')
     parser.add_argument('--user', required=True, help='iTop username')
     parser.add_argument('--password', required=True, help='iTop password')
+    parser.add_argument('--no-ssl-verify', action='store_true', help='Disable SSL certificate verification')
     
     args = parser.parse_args()
     
     logger.info("Starting iTop machine import")
     
     # Process the CSV file
-    processed, updated, skipped = process_csv(args.file, args.url, args.user, args.password)
+    processed, updated, skipped = process_csv(
+        args.file, 
+        args.url, 
+        args.user, 
+        args.password, 
+        not args.no_ssl_verify  # Invert the flag for verify_ssl parameter
+    )
     
     logger.info(f"Import complete. Processed: {processed}, Updated: {updated}, Skipped: {skipped}")
 
