@@ -1,207 +1,491 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+iTop Machine Import Script
+
+This script reads a CSV file containing machine data and updates existing machines in iTop.
+It searches for machines by name and updates their information if they are found.
+If a machine is not found, it skips to the next one.
+
+CSV file structure:
+machineType,name,fqdn,hostname,ip,description,os,os_version,cpu,memory,disk,owner,csamID
+"""
+
+import argparse
 import csv
-import socket
-# import random # No longer needed for real API calls
+import json
+import logging
+import os
+import sys
+from datetime import datetime
 import requests
-import json # Needed for working with JSON payloads
 
-# --- Configuration ---
-# Replace with the actual path to your CSV file
-csv_file_path = 'machines.csv'
+# Set up logging
+logger = logging.getLogger('itop_machine_import')
 
-# iTop API Configuration
-itop_url = 'https://myitop.example.com' # Your iTop base URL
-itop_api_endpoint = f'{itop_url}/webservices/rest.php' # Common REST API endpoint
-itop_api_version = '1.3' # Check your iTop version and API documentation
-itop_user = 'itopuser'
-itop_password = 'XXXX' # Replace with your actual password or a secure method
+def configure_logging():
+    """
+    Configure logging to output to both console and a log file
+    """
+    # Create logs directory if it doesn't exist
+    log_dir = 'logs'
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    # Create a timestamped log file
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file = os.path.join(log_dir, f'itop_import_{timestamp}.log')
+    
+    # Configure logging
+    logger.setLevel(logging.INFO)
+    
+    # File handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.INFO)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    
+    # Format
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    # Add handlers to logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    logger.info("Starting iTop machine import")
+    logger.info(f"Logging to {log_file}")
+    
+    return log_file
+
+# Initialize logging at module level
+configure_logging()
 
 # --- iTop API Functions ---
-# IMPORTANT: You might need to adjust the endpoint, API version,
-# authentication method, and payload structure based on your specific iTop setup.
 
-def call_itop_api(operation, class_name, key=None, fields=None):
+def call_itop_api(url, username, password, operation, class_name, key=None, fields=None, version='1.3', verify_ssl=False):
     """
     Helper function to make calls to the iTop REST API.
-    Adjust the payload structure if your iTop API requires a different format.
+    
+    Args:
+        url (str): iTop API URL
+        username (str): iTop username
+        password (str): iTop password
+        operation (str): API operation to perform
+        class_name (str): iTop class name
+        key: Search key or object ID
+        fields (dict): Fields to update
+        version (str): API version
+        verify_ssl (bool): Whether to verify SSL certificate
     """
     payload = {
-        'version': itop_api_version,
+        'version': version,
         'auth': {
-            'user': itop_user,
-            'password': itop_password
+            'user': username,
+            'password': password
         },
         'operation': operation,
         'class': class_name,
     }
+    
     if key:
         payload['key'] = key
+    
     if fields:
         payload['fields'] = fields
-
+        
+    if operation == 'core/update':
+        payload['comment'] = 'Updated via CSV import script'
+    
+    # Log the API request for debugging
+    logger.info(f"API Request to {url}")
+    logger.info(f"Payload: {json.dumps(payload)[:500]}..." if len(json.dumps(payload)) > 500 else json.dumps(payload))
+    
     try:
-        # Use verify=False if you have SSL certificate issues (NOT recommended for production)
-        response = requests.post(itop_api_endpoint, json=payload, verify=True)
-        response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
-        return response.json()
+        response = requests.post(url, json=payload, verify=verify_ssl)
+        # Log the raw response for debugging
+        logger.debug(f"Raw API response: {response.text[:500]}..." if len(response.text) > 500 else response.text)
+        response.raise_for_status()
+        json_response = response.json()
+        return json_response
     except requests.exceptions.RequestException as e:
-        print(f"  [API ERROR] Request failed: {e}")
+        logger.error(f"API call failed: {e}")
+        logger.error(f"URL: {url}")
+        # Try to get the response content if available
+        try:
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response content: {e.response.text}")
+        except:
+            pass
         return None
-    except json.JSONDecodeError:
-        print(f"  [API ERROR] Failed to decode JSON response from iTop.")
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to decode JSON response from iTop: {e}")
+        logger.error(f"Response text: {response.text[:500]}..." if len(response.text) > 500 else response.text)
         return None
 
-
-def search_itop(name, ip):
+def search_machine_by_name(url, username, password, machine_type, name, ip=None, verify_ssl=False):
     """
-    Searches for a machine in iTop by name or IP using the iTop REST API.
-    Returns the iTop object data if found, None otherwise.
-    Adjust the OQL query ('key' parameter) if needed for your iTop data model.
+    Search for a machine in iTop by name or IP
+    
+    Args:
+        url (str): iTop API URL
+        username (str): iTop username
+        password (str): iTop password
+        machine_type (str): Type of machine ('Server' or 'VirtualMachine')
+        name (str): Machine name
+        ip (str): Optional IP address to search by
+        verify_ssl (bool): Whether to verify SSL certificate
+    
+    Returns:
+        dict: Machine data if found, None otherwise
     """
-    print(f"  Searching iTop for machine: {name} ({ip})")
-    # Example OQL query to search for Server by name or IP
-    # Adjust 'Server' if your CI class is different
-    oql_query = f"SELECT Server WHERE name = '{name}' OR ipaddress = '{ip}'"
-
-    # Using 'core/get' operation to search
-    # The 'key' parameter here is the OQL query for 'core/get'
+    logger.info(f"Searching for {machine_type}: {name}" + (f" ({ip})" if ip else ""))
+    
+    # Create a combined query with name OR IP if provided
+    if ip:
+        # Use managementip for the IP field
+        oql_query = f"SELECT {machine_type} WHERE name = '{name}' OR managementip = '{ip}'"
+    else:
+        oql_query = f"SELECT {machine_type} WHERE name = '{name}'"
+        
+    logger.info(f"Executing query: {oql_query}")
+    
+    # Call the API
     result = call_itop_api(
+        url=url,
+        username=username,
+        password=password,
         operation='core/get',
-        class_name='Server', # Adjust if your CI class is different
-        key=oql_query
+        class_name=machine_type,
+        key=oql_query,
+        verify_ssl=verify_ssl
     )
-
-    if result and result.get('objects'):
-        # iTop API 'core/get' returns objects keyed by their object ID
-        # We just need to check if any objects were returned
+    
+    # Check if we got results
+    if result and isinstance(result, dict) and result.get('objects'):
         found_objects = result['objects']
         if found_objects:
-            # Return the first found object's data
+            # Get the first matching object
             first_object_id = list(found_objects.keys())[0]
-            print(f"  Machine '{name}' found in iTop with ID: {first_object_id}")
+            logger.info(f"Found {machine_type} with ID: {first_object_id}")
             return found_objects[first_object_id]
-        else:
-            print(f"  Machine '{name}' not found in iTop.")
-            return None
     elif result is not None:
-         # API call was successful but returned no objects key or empty objects
-         print(f"  Machine '{name}' not found in iTop.")
-         return None
+        # API call was successful but returned no objects
+        logger.info(f"Machine '{name}' not found in iTop.")
     else:
         # API call failed
-        print(f"  Failed to search iTop for '{name}'.")
-        return None
+        logger.error(f"Failed to search iTop for '{name}'.")
+    
+    return None
 
-
-def update_itop(name, owner, description):
+def update_machine(url, username, password, machine_type, name, fields, verify_ssl=False):
     """
-    Updates a machine's owner and description in iTop using the iTop REST API.
-    Assumes you can identify the object to update by its 'name'.
-    Adjust the 'class', 'key', and 'fields' parameters as needed.
+    Update a machine in iTop
+    
+    Args:
+        url (str): iTop API URL
+        username (str): iTop username
+        password (str): iTop password
+        machine_type (str): Type of machine ('Server' or 'VirtualMachine')
+        name (str): Machine name
+        fields (dict): Fields to update
+        verify_ssl (bool): Whether to verify SSL certificate
+    
+    Returns:
+        bool: True if update succeeded, False otherwise
     """
-    print(f"  Attempting to update iTop for machine: {name}")
-    print(f"    Setting Owner to: {owner}")
-    print(f"    Setting Description to: {description}")
-
-    # Using 'core/update' operation
-    # The 'key' parameter here identifies the object to update (using OQL)
-    # The 'fields' parameter contains the data to update
-    # Assuming 'owner_id' is the field name for the owner and 'description' for description
-    # You might need to map the 'owner' name from CSV to an iTop owner_id if needed
+    # Use an OQL query to identify the machine by name
+    key = f"SELECT {machine_type} WHERE name = '{name}'"
+    
+    logger.info(f"Updating {machine_type} '{name}' with fields: {fields}")
+    
     result = call_itop_api(
+        url=url,
+        username=username,
+        password=password,
         operation='core/update',
-        class_name='Server', # Adjust if your CI class is different
-        key=f"SELECT Server WHERE name = '{name}'", # Identify object by name
-        fields={
-            # Assuming 'owner_id' is the field name for the owner.
-            # If 'owner' in your CSV is a name and iTop expects an ID,
-            # you'll need an extra step to look up the owner ID in iTop first.
-            'owner_id': owner,
-            'description': description
-        }
+        class_name=machine_type,
+        key=key,
+        fields=fields,
+        verify_ssl=verify_ssl
     )
-
-    if result and result.get('message') == 'Object updated':
-        print(f"  Successfully updated '{name}' in iTop.")
-        return True
-    elif result is not None:
-        # API call was successful but update failed (check iTop API response details)
-        print(f"  Update failed for '{name}'. iTop response: {result.get('message', 'No message')}")
-        # Print full result for debugging if needed: print(json.dumps(result, indent=2))
-        return False
+    
+    # Safely check the result
+    success = False
+    if result and isinstance(result, dict):
+        if 'code' in result:
+            logger.info(f"Update API response code: {result.get('code')}")
+        if 'message' in result:
+            logger.info(f"Update API response message: {result.get('message')}")
+            
+        # Check for successful update
+        if result.get('code') == 0 or result.get('message') == 'Object updated':
+            logger.info(f"Successfully updated {machine_type} '{name}'")
+            success = True
+        else:
+            # Log any error message
+            error_msg = result.get('message', 'Unknown error')
+            logger.warning(f"Failed to update {machine_type} '{name}': {error_msg}")
     else:
-        # API call failed
-        print(f"  Failed to update '{name}' in iTop.")
-        return False
+        logger.warning(f"Failed to update {machine_type} '{name}': No valid response from API")
+        
+    return success
 
-
-# --- Main Script Logic ---
-
-def process_machines_from_csv(file_path):
+def process_csv(file_path, url, username, password, verify_ssl=False):
     """
-    Reads machine data from a CSV, performs checks, and interacts with iTop.
+    Process a CSV file and update machines in iTop
+    
+    Args:
+        file_path (str): Path to the CSV file
+        url (str): iTop API URL
+        username (str): iTop username
+        password (str): iTop password
+        verify_ssl (bool): Whether to verify SSL certificate
+    
+    Returns:
+        tuple: Number of processed, updated, and skipped records
     """
-    print(f"Starting to process CSV file: {file_path}")
-
+    processed = 0
+    updated = 0
+    skipped = 0
+    
     try:
-        with open(file_path, mode='r', encoding='utf-8') as csv_file:
-            csv_reader = csv.DictReader(csv_file)
-
-            # Check if required headers are present
-            required_headers = ['Name', 'IP', 'Owner', 'Description']
-            if not all(header in csv_reader.fieldnames for header in required_headers):
-                print(f"Error: CSV file must contain the following headers: {', '.join(required_headers)}")
-                return
-
-            line_num = 1 # Start line number after header
-
-            for row in csv_reader:
-                line_num += 1
-                name = row.get('Name', '').strip()
-                ip = row.get('IP', '').strip()
-                owner = row.get('Owner', '').strip()
-                description = row.get('Description', '').strip()
-
-                print(f"\nProcessing line {line_num}: Name='{name}', IP='{ip}'")
-
-                if not name or not ip:
-                    print(f"  Skipping line {line_num}: Missing Name or IP.")
-                    continue
-
-                # 1. Verify if the IP matches the name using DNS lookup
+        logger.info(f"Opening CSV file: {file_path}")
+        # Try different encodings if needed
+        encodings = ['utf-8', 'utf-8-sig', 'latin1', 'ISO-8859-1']
+        for encoding in encodings:
+            try:
+                with open(file_path, 'r', newline='', encoding=encoding) as test_file:
+                    test_file.read(1024)
+                logger.info(f"Successfully opened file with encoding: {encoding}")
+                break
+            except UnicodeDecodeError:
+                logger.warning(f"Failed to open file with encoding: {encoding}")
+                if encoding == encodings[-1]:
+                    logger.error("Unable to open file with any supported encoding")
+                    return processed, updated, skipped
+                continue
+        
+        # Open with the successful encoding
+        with open(file_path, 'r', newline='', encoding=encoding) as csvfile:
+            # Try to determine the CSV format
+            try:
+                dialect = csv.Sniffer().sniff(csvfile.read(1024))
+                csvfile.seek(0)  # Go back to beginning of file
+            except csv.Error:
+                logger.info("Could not determine CSV dialect, using default")
+                dialect = csv.excel
+            
+            # Read the CSV file
+            reader = csv.DictReader(csvfile, dialect=dialect)
+            field_names = reader.fieldnames if reader.fieldnames else []
+            logger.info(f"CSV field names: {field_names}")
+            
+            # Check for required fields with alternate names
+            has_machine_type = 'type' in field_names or 'machineType' in field_names
+            has_name = 'name' in field_names
+            
+            if not has_machine_type:
+                logger.error("CSV is missing required field 'type' or 'machineType'. Cannot continue.")
+                return processed, updated, skipped
+                
+            if not has_name:
+                logger.error("CSV is missing required field 'name'. Cannot continue.")
+                return processed, updated, skipped
+                
+            # Determine which field name to use for machine type
+            type_field = 'machineType' if 'machineType' in field_names else 'type'
+            logger.info(f"Using '{type_field}' for machine type field")
+            
+            # Process each row
+            for row_num, row in enumerate(reader, start=1):
                 try:
-                    resolved_ip = socket.gethostbyname(name)
-                    if resolved_ip != ip:
-                        print(f"  Skipping line {line_num}: IP mismatch. DNS resolved '{name}' to '{resolved_ip}', but CSV has '{ip}'.")
+                    processed += 1
+                    logger.info(f"Processing row {row_num}: {row}")
+                    
+                    # Extract and validate required fields
+                    machine_type = row.get(type_field, '').strip() if row.get(type_field) else ''
+                    name = row.get('name', '').strip() if row.get('name') else ''
+                    ip = row.get('ip', '').strip() if row.get('ip') else ''
+                    
+                    # Validate machine type and name
+                    if not machine_type:
+                        logger.warning(f"Row {row_num}: Missing machine type. Skipping.")
+                        skipped += 1
                         continue
-                    else:
-                        print(f"  DNS match: '{name}' resolved to '{resolved_ip}'.")
-
-                except socket.gaierror as e:
-                    print(f"  Skipping line {line_num}: Could not resolve hostname '{name}'. Error: {e}")
+                    
+                    if not name:
+                        logger.warning(f"Row {row_num}: Missing machine name. Skipping.")
+                        skipped += 1
+                        continue
+                    
+                    # Validate machine type
+                    if machine_type not in ['Server', 'VirtualMachine']:
+                        logger.warning(f"Row {row_num}: Invalid machine type '{machine_type}'. Skipping.")
+                        skipped += 1
+                        continue
+                    
+                    logger.info(f"Processing {machine_type}: {name}")
+                    
+                    try:
+                        # Search for the machine in iTop
+                        machine = search_machine_by_name(
+                            url=url,
+                            username=username,
+                            password=password,
+                            machine_type=machine_type,
+                            name=name,
+                            ip=ip,
+                            verify_ssl=verify_ssl
+                        )
+                        
+                        if not machine:
+                            logger.warning(f"Row {row_num}: {machine_type} '{name}' not found in iTop. Skipping.")
+                            skipped += 1
+                            continue
+                        
+                        logger.info(f"Machine '{name}' found in iTop. Proceeding to update.")
+                        
+                        # Prepare fields to update
+                        fields = {}
+                        
+                        # Handle IP field
+                        if ip:
+                            # The IP field in iTop is called 'managementip' for both types
+                            fields['managementip'] = ip
+                        
+                        # Base field mapping - common for all machine types
+                        field_mapping = {
+                            'fqdn': 'fqdn',
+                            'hostname': 'hostname',
+                            'os': 'os_family',
+                            'os_version': 'os_version',
+                            'cpu': 'cpu',
+                            'memory': 'ram',
+                            'owner': 'owner_name',  # May need to be 'owner_id' depending on iTop
+                            'csamID': 'csam_id'
+                        }
+                        
+                        # Handle type-specific field mappings
+                        if machine_type == 'VirtualMachine':
+                            # For VirtualMachine, map description to notes and include disk field
+                            if 'description' in row and row.get('description') and row['description'].strip():
+                                fields['notes'] = row['description'].strip()
+                            
+                            # Only process disk field for VirtualMachine
+                            if 'disk' in row and row.get('disk') and row['disk'].strip():
+                                fields['disk_space'] = row['disk'].strip()
+                        else:  # Server type
+                            # For Server, map description to description
+                            if 'description' in row and row.get('description') and row['description'].strip():
+                                fields['description'] = row['description'].strip()
+                            
+                            # Ignore disk field for Server type
+                        
+                        # Add other non-empty fields to the update
+                        for csv_field, itop_field in field_mapping.items():
+                            if csv_field in row and row.get(csv_field) and row[csv_field].strip():
+                                fields[itop_field] = row[csv_field].strip()
+                        
+                        # Update the machine in iTop
+                        if fields:  # Only update if there are fields to update
+                            logger.info(f"Updating {machine_type} '{name}' with fields: {fields}")
+                            success = update_machine(
+                                url=url,
+                                username=username,
+                                password=password,
+                                machine_type=machine_type,
+                                name=name,
+                                fields=fields,
+                                verify_ssl=verify_ssl
+                            )
+                            
+                            if success:
+                                updated += 1
+                                logger.info(f"Successfully updated {machine_type} '{name}'")
+                            else:
+                                skipped += 1
+                                logger.warning(f"Failed to update {machine_type} '{name}'")
+                        else:
+                            logger.warning(f"Row {row_num}: No fields to update for {machine_type} '{name}'. Skipping.")
+                            skipped += 1
+                    
+                    except Exception as e:
+                        logger.error(f"Error processing row {row_num}: {e}")
+                        skipped += 1
+                        continue
+                
+                except Exception as row_error:
+                    logger.error(f"Error processing row {row_num}: {row_error}")
+                    skipped += 1
                     continue
-                except Exception as e:
-                    print(f"  Skipping line {line_num}: An unexpected error occurred during DNS lookup for '{name}'. Error: {e}")
-                    continue
-
-                # 2. Search the machine in iTop
-                itop_object = search_itop(name, ip)
-
-                if itop_object:
-                    # 3. If the machine exists, update the Owner and Description
-                    print(f"  Machine '{name}' found in iTop. Proceeding to update.")
-                    if update_itop(name, owner, description):
-                        print(f"  Successfully processed and updated '{name}'.")
-                    else:
-                         print(f"  Failed to update '{name}'. Check update_itop function and iTop API response.")
-                else:
-                    print(f"  Machine '{name}' not found in iTop or search failed. Skipping update.")
-
+        
+        logger.info(f"CSV processing complete. Processed: {processed}, Updated: {updated}, Skipped: {skipped}")
+        return processed, updated, skipped
+    
     except FileNotFoundError:
-        print(f"Error: CSV file not found at {file_path}")
+        logger.error(f"CSV file not found: {file_path}")
+        return processed, updated, skipped
+    except csv.Error as e:
+        logger.error(f"CSV error: {e}")
+        return processed, updated, skipped
     except Exception as e:
-        print(f"An unexpected error occurred while processing the CSV: {e}")
+        logger.error(f"Error processing CSV: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return processed, updated, skipped
 
-# --- Run the script ---
+
+def main():
+    """
+    Main entry point
+    """
+    parser = argparse.ArgumentParser(description='Import machine data from CSV to iTop')
+    parser.add_argument('csv_file', help='Path to the CSV file')
+    parser.add_argument('--url', required=True, help='iTop REST API URL (e.g., https://itop.example.com/webservices/rest.php)')
+    parser.add_argument('--user', required=True, help='iTop username')
+    parser.add_argument('--password', required=True, help='iTop password')
+    parser.add_argument('--verify-ssl', action='store_true', dest='verify_ssl',
+                        help='Enable SSL certificate verification (disabled by default)')
+    
+    args = parser.parse_args()
+    
+    # Check if the CSV file exists
+    if not os.path.isfile(args.csv_file):
+        logger.error(f"CSV file not found: {args.csv_file}")
+        return 1
+    
+    try:
+        # Display SSL verification status
+        if args.verify_ssl:
+            logger.info("SSL certificate verification is enabled")
+        else:
+            logger.info("SSL certificate verification is disabled")
+            
+        # Process the CSV file
+        processed, updated, skipped = process_csv(
+            file_path=args.csv_file,
+            url=args.url,
+            username=args.user,
+            password=args.password,
+            verify_ssl=args.verify_ssl
+        )
+        
+        # Print summary
+        logger.info("\nSummary:")
+        logger.info(f"Processed: {processed}")
+        logger.info(f"Updated: {updated}")
+        logger.info(f"Skipped: {skipped}")
+        
+        return 0
+    except Exception as e:
+        logger.exception(f"An error occurred: {e}")
+        return 1
+
+
 if __name__ == "__main__":
-    process_machines_from_csv(csv_file_path)
-    print("\nScript finished.")
+    main()
