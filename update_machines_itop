@@ -130,13 +130,9 @@ def search_machine_by_name(url, username, password, machine_type, name, ip=None,
     """
     logger.info(f"Searching for {machine_type}: {name}" + (f" ({ip})" if ip else ""))
     
-    # Create an OQL query to search by name, and also by IP if provided
-    if ip:
-        # The IP field in iTop is called 'managementip' for both VirtualMachine and Server
-        ip_field = 'managementip'
-        oql_query = f"SELECT {machine_type} WHERE name = '{name}' OR {ip_field} = '{ip}'"
-    else:
-        oql_query = f"SELECT {machine_type} WHERE name = '{name}'"
+    # First try to search by just the name as this is most reliable
+    name_query = f"SELECT {machine_type} WHERE name = '{name}'"
+    logger.info(f"Executing query: {name_query}")
     
     result = call_itop_api(
         url=url,
@@ -144,10 +140,23 @@ def search_machine_by_name(url, username, password, machine_type, name, ip=None,
         password=password,
         operation='core/get',
         class_name=machine_type,
-        key=oql_query,
+        key=name_query,
         verify_ssl=verify_ssl
     )
     
+    # Log raw API response for debugging
+    if result:
+        logger.info(f"API response received: {json.dumps(result)[:500]}..." if len(json.dumps(result)) > 500 else json.dumps(result))
+        
+        # Check the code and message if present
+        if 'code' in result:
+            logger.info(f"API response code: {result.get('code')}")
+        if 'message' in result:
+            logger.info(f"API response message: {result.get('message')}")
+    else:
+        logger.warning("No response received from API call")
+    
+    # If we found objects, return the first one
     if result and result.get('objects'):
         found_objects = result['objects']
         if found_objects:
@@ -156,7 +165,33 @@ def search_machine_by_name(url, username, password, machine_type, name, ip=None,
             logger.info(f"Found {machine_type} with ID: {first_object_id}")
             return found_objects[first_object_id]
     
-    logger.info(f"No {machine_type} found with name '{name}'" + (f" or IP '{ip}'" if ip else ""))
+    # If we didn't find by name and IP is provided, try IP separately
+    if ip and not result.get('objects'):
+        logger.info(f"Trying to search by IP: {ip}")
+        # Try several possible field names for IP
+        for ip_field in ['managementip', 'ip_address', 'ipaddress', 'primaryip']:
+            ip_query = f"SELECT {machine_type} WHERE {ip_field} = '{ip}'"
+            logger.info(f"Trying query: {ip_query}")
+            
+            ip_result = call_itop_api(
+                url=url,
+                username=username,
+                password=password,
+                operation='core/get',
+                class_name=machine_type,
+                key=ip_query,
+                verify_ssl=verify_ssl
+            )
+            
+            if ip_result and ip_result.get('objects'):
+                found_objects = ip_result['objects']
+                if found_objects:
+                    # Get the first matching object
+                    first_object_id = list(found_objects.keys())[0]
+                    logger.info(f"Found {machine_type} with ID: {first_object_id} using field {ip_field}")
+                    return found_objects[first_object_id]
+    
+    logger.warning(f"No {machine_type} found with name '{name}'" + (f" or IP '{ip}'" if ip else ""))
     return None
 
 def update_machine(url, username, password, machine_type, name, fields, verify_ssl=False):
@@ -380,3 +415,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
