@@ -118,7 +118,8 @@ def call_itop_api(url, username, password, operation, class_name, key=None, fiel
         # Try to get the response content if available
         try:
             if hasattr(e, 'response') and e.response is not None:
-                logger.error(f"Response content: {e.response.text}")
+                logger.error(f"Response status code: {e.response.status_code}")
+                logger.error(f"Response content: {e.response.text[:500]}")
         except:
             pass
         return None
@@ -145,85 +146,41 @@ def search_machine_by_name(url, username, password, machine_type, name, ip=None,
     """
     logger.info(f"Searching for {machine_type}: {name}" + (f" ({ip})" if ip else ""))
     
-    # First try to search by just the name as this is most reliable
-    name_query = f"SELECT {machine_type} WHERE name = '{name}'"
-    logger.info(f"Executing query: {name_query}")
+    # Create a combined query with name OR IP if provided
+    if ip:
+        # Use managementip for the IP field
+        oql_query = f"SELECT {machine_type} WHERE name = '{name}' OR managementip = '{ip}'"
+    else:
+        oql_query = f"SELECT {machine_type} WHERE name = '{name}'"
+        
+    logger.info(f"Executing query: {oql_query}")
     
+    # Call the API
     result = call_itop_api(
         url=url,
         username=username,
         password=password,
         operation='core/get',
         class_name=machine_type,
-        key=name_query,
+        key=oql_query,
         verify_ssl=verify_ssl
     )
     
-    # Log raw API response for debugging
-    if result:
-        try:
-            logger.info(f"API response received: {json.dumps(result)[:500]}..." if len(json.dumps(result)) > 500 else json.dumps(result))
-            
-            # Check the code and message if present
-            if 'code' in result:
-                logger.info(f"API response code: {result.get('code')}")
-            if 'message' in result:
-                logger.info(f"API response message: {result.get('message')}")
-                
-            # If there's an error message in the API response, log it
-            if result.get('code') != 0 and result.get('message'):
-                logger.error(f"API error: {result.get('message')}")
-                
-        except Exception as e:
-            logger.error(f"Error while processing API response: {e}")
-    else:
-        logger.warning("No response received from API call")
-    
-    # If we found objects, return the first one
-    found_objects = None
-    if result and isinstance(result, dict):
-        found_objects = result.get('objects')
-        
-    if found_objects:
-        try:
+    # Check if we got results
+    if result and isinstance(result, dict) and result.get('objects'):
+        found_objects = result['objects']
+        if found_objects:
             # Get the first matching object
             first_object_id = list(found_objects.keys())[0]
             logger.info(f"Found {machine_type} with ID: {first_object_id}")
             return found_objects[first_object_id]
-        except (IndexError, KeyError) as e:
-            logger.error(f"Error extracting object data: {e}")
+    elif result is not None:
+        # API call was successful but returned no objects
+        logger.info(f"Machine '{name}' not found in iTop.")
+    else:
+        # API call failed
+        logger.error(f"Failed to search iTop for '{name}'.")
     
-    # If we didn't find by name and IP is provided, try IP separately
-    if ip:
-        logger.info(f"Trying to search by IP: {ip}")
-        # Try several possible field names for IP
-        for ip_field in ['managementip', 'ip_address', 'ipaddress', 'primaryip']:
-            ip_query = f"SELECT {machine_type} WHERE {ip_field} = '{ip}'"
-            logger.info(f"Trying query: {ip_query}")
-            
-            ip_result = call_itop_api(
-                url=url,
-                username=username,
-                password=password,
-                operation='core/get',
-                class_name=machine_type,
-                key=ip_query,
-                verify_ssl=verify_ssl
-            )
-            
-            # Safely check for objects
-            if ip_result and isinstance(ip_result, dict) and ip_result.get('objects'):
-                try:
-                    found_objects = ip_result['objects']
-                    if found_objects:
-                        # Get the first matching object
-                        first_object_id = list(found_objects.keys())[0]
-                        logger.info(f"Found {machine_type} with ID: {first_object_id} using field {ip_field}")
-                        return found_objects[first_object_id]
-                except (IndexError, KeyError) as e:
-                    logger.error(f"Error extracting object data for IP search: {e}")
-    
-    logger.warning(f"No {machine_type} found with name '{name}'" + (f" or IP '{ip}'" if ip else ""))
     return None
 
 def update_machine(url, username, password, machine_type, name, fields, verify_ssl=False):
