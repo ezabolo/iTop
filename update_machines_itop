@@ -132,8 +132,8 @@ def search_machine_by_name(url, username, password, machine_type, name, ip=None,
     
     # Create an OQL query to search by name, and also by IP if provided
     if ip:
-        # Assume the IP field name in iTop is 'ip_address' for VirtualMachine and 'ipaddress' for Server
-        ip_field = 'ip_address' if machine_type == 'VirtualMachine' else 'ipaddress'
+        # The IP field in iTop is called 'managementip' for both VirtualMachine and Server
+        ip_field = 'managementip'
         oql_query = f"SELECT {machine_type} WHERE name = '{name}' OR {ip_field} = '{ip}'"
     else:
         oql_query = f"SELECT {machine_type} WHERE name = '{name}'"
@@ -268,10 +268,10 @@ def process_csv(file_path, url, username, password, verify_ssl=False):
                 # Prepare fields to update
                 fields = {}
                 
-                # Handle IP field properly based on machine type
+                # Handle IP field
                 if ip:
-                    ip_field = 'ip_address' if machine_type == 'VirtualMachine' else 'ipaddress'
-                    fields[ip_field] = ip
+                    # The IP field in iTop is called 'managementip' for both VirtualMachine and Server
+                    fields['managementip'] = ip
                 
                 # Base field mapping - common for all machine types
                 field_mapping = {
