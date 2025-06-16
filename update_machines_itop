@@ -284,9 +284,84 @@ def update_machine(url, username, password, machine_type, name, fields, verify_s
         
     return success
 
+def check_api_connection(url, username, password, verify_ssl=False):
+    """
+    Check if we can connect to the iTop API before attempting any imports
+    
+    Args:
+        url (str): iTop API URL
+        username (str): iTop username
+        password (str): iTop password
+        verify_ssl (bool): Whether to verify SSL certificate
+    
+    Returns:
+        bool: True if connection is successful, False otherwise
+    """
+    logger.info("Testing API connectivity...")
+    
+    # Try a very simple API call to test connectivity
+    test_query = "SELECT Organization LIMIT 1"
+    
+    result = call_itop_api(
+        url=url,
+        username=username,
+        password=password,
+        operation='core/get',
+        class_name='Organization',
+        key=test_query,
+        verify_ssl=verify_ssl
+    )
+    
+    if result is None:
+        logger.error("API connection test failed - could not connect to iTop")
+        return False
+    
+    if 'code' in result and result['code'] != 0:
+        logger.error(f"API connection test failed with error code {result['code']}: {result.get('message', 'Unknown error')}")
+        return False
+        
+    logger.info("✓ API connection test successful!")
+    
+    # As an additional test, check if the expected classes exist
+    for class_name in ['Server', 'VirtualMachine']:
+        logger.info(f"Checking if class '{class_name}' exists...")
+        class_query = f"SELECT {class_name} LIMIT 1"
+        class_result = call_itop_api(
+            url=url,
+            username=username,
+            password=password,
+            operation='core/get',
+            class_name=class_name,
+            key=class_query,
+            verify_ssl=verify_ssl
+        )
+        
+        if class_result is None or ('code' in class_result and class_result['code'] != 0):
+            logger.warning(f"Class '{class_name}' may not exist in this iTop instance or you may not have access to it")
+        else:
+            logger.info(f"✓ Class '{class_name}' exists and is accessible")
+    
+    # Print version info if we can get it
+    try:
+        version_result = call_itop_api(
+            url=url,
+            username=username,
+            password=password,
+            operation='core/check_version',
+            class_name='',  # Not needed for this operation
+            verify_ssl=verify_ssl
+        )
+        
+        if version_result and 'version' in version_result:
+            logger.info(f"iTop API version: {version_result['version']}")
+    except Exception as e:
+        logger.debug(f"Could not retrieve version info: {e}")
+        
+    return True
+
 def process_csv(file_path, url, username, password, verify_ssl=False):
     """
-    Process a CSV file and update machines in iTop
+    Process the CSV file and update machines in iTop
     
     Args:
         file_path (str): Path to the CSV file
@@ -488,7 +563,6 @@ def process_csv(file_path, url, username, password, verify_ssl=False):
         logger.error(f"Traceback: {traceback.format_exc()}")
         return processed, updated, skipped
 
-
 def main():
     """
     Main entry point
@@ -507,6 +581,13 @@ def main():
     if not os.path.isfile(args.csv_file):
         logger.error(f"CSV file not found: {args.csv_file}")
         return 1
+    
+    # First check if we can connect to the API
+    if not check_api_connection(args.url, args.user, args.password, args.verify_ssl):
+        logger.error("API connectivity check failed. Aborting import.")
+        return 1
+    
+    logger.info("API connectivity check passed. Proceeding with import...\n")
     
     try:
         # Display SSL verification status
