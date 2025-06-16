@@ -146,40 +146,88 @@ def search_machine_by_name(url, username, password, machine_type, name, ip=None,
     """
     logger.info(f"Searching for {machine_type}: {name}" + (f" ({ip})" if ip else ""))
     
-    # Create a combined query with name OR IP if provided
-    if ip:
-        # Use managementip for the IP field
-        oql_query = f"SELECT {machine_type} WHERE name = '{name}' OR managementip = '{ip}'"
-    else:
-        oql_query = f"SELECT {machine_type} WHERE name = '{name}'"
-        
-    logger.info(f"Executing query: {oql_query}")
+    # First, try to find by name only (most reliable)
+    name_query = f"SELECT {machine_type} WHERE name = '{name}'"
+    logger.info(f"Trying name-only query: {name_query}")
     
-    # Call the API
-    result = call_itop_api(
+    name_result = call_itop_api(
         url=url,
         username=username,
         password=password,
         operation='core/get',
         class_name=machine_type,
-        key=oql_query,
+        key=name_query,
         verify_ssl=verify_ssl
     )
     
-    # Check if we got results
-    if result and isinstance(result, dict) and result.get('objects'):
-        found_objects = result['objects']
+    # Log the response code and message if available
+    if name_result:
+        if 'code' in name_result:
+            logger.info(f"API response code: {name_result.get('code')}")
+        if 'message' in name_result:
+            logger.info(f"API response message: {name_result.get('message')}")
+    
+    # Check if we got results from the name query
+    if name_result and isinstance(name_result, dict) and name_result.get('objects'):
+        found_objects = name_result['objects']
         if found_objects:
-            # Get the first matching object
             first_object_id = list(found_objects.keys())[0]
-            logger.info(f"Found {machine_type} with ID: {first_object_id}")
+            logger.info(f"Found {machine_type} with ID: {first_object_id} by name")
             return found_objects[first_object_id]
-    elif result is not None:
-        # API call was successful but returned no objects
-        logger.info(f"Machine '{name}' not found in iTop.")
+    
+    # If no results by name and we have an IP, try different IP field names
+    if ip:
+        logger.info(f"Name search failed, trying IP search for: {ip}")
+        ip_fields = ['managementip', 'ip_address', 'ipaddress', 'primaryip', 'ip']
+        
+        for ip_field in ip_fields:
+            ip_query = f"SELECT {machine_type} WHERE {ip_field} = '{ip}'"
+            logger.info(f"Trying query with {ip_field}: {ip_query}")
+            
+            ip_result = call_itop_api(
+                url=url,
+                username=username,
+                password=password,
+                operation='core/get',
+                class_name=machine_type,
+                key=ip_query,
+                verify_ssl=verify_ssl
+            )
+            
+            if ip_result and isinstance(ip_result, dict) and ip_result.get('objects'):
+                found_objects = ip_result['objects']
+                if found_objects:
+                    first_object_id = list(found_objects.keys())[0]
+                    logger.info(f"Found {machine_type} with ID: {first_object_id} using {ip_field}")
+                    return found_objects[first_object_id]
+            elif ip_result and 'code' in ip_result and ip_result.get('code') != 0:
+                # If there was an error during the query (likely an invalid field name)
+                # Log the error but continue trying other fields
+                logger.info(f"Query with {ip_field} returned error: {ip_result.get('message', 'Unknown error')}")
+    
+    # If we got here, machine was not found by name or IP
+    logger.warning(f"No {machine_type} found with name '{name}'" + (f" or IP '{ip}'" if ip else ""))
+    
+    # Try a catch-all query to see if any machines exist (for debugging)
+    debug_query = f"SELECT {machine_type} LIMIT 1"
+    logger.info(f"Running debug query to verify API access: {debug_query}")
+    debug_result = call_itop_api(
+        url=url,
+        username=username,
+        password=password,
+        operation='core/get',
+        class_name=machine_type,
+        key=debug_query,
+        verify_ssl=verify_ssl
+    )
+    
+    if debug_result and isinstance(debug_result, dict):
+        if debug_result.get('objects'):
+            logger.info(f"Debug query succeeded, found at least one {machine_type} object. API is working.")
+        else:
+            logger.warning(f"Debug query succeeded but found no {machine_type} objects. Check class name or that the iTop instance has {machine_type} objects.")
     else:
-        # API call failed
-        logger.error(f"Failed to search iTop for '{name}'.")
+        logger.error(f"Debug query failed. The class '{machine_type}' might not exist in this iTop instance.")
     
     return None
 
