@@ -82,51 +82,127 @@ def call_itop_api(url, username, password, operation, class_name, key=None, fiel
         version (str): API version
         verify_ssl (bool): Whether to verify SSL certificate
     """
-    payload = {
-        'version': version,
+    # Try multiple API versions - some iTop instances require specific versions
+    versions_to_try = [version]
+    
+    # Add additional versions to try if the primary fails
+    if version == '1.3':
+        versions_to_try.extend(['1.0', '1.1', '1.2', '2.0'])
+    
+    last_response = None
+    last_exception = None
+    
+    # Try each version
+    for current_version in versions_to_try:
+        logger.info(f"Trying API version: {current_version}")
+        payload = {
+            'version': current_version,
+            'auth': {
+                'user': username,
+                'password': password
+            },
+            'operation': operation,
+        }
+        
+        # Only include class for operations that need it
+        if class_name:
+            payload['class'] = class_name
+        
+        if key:
+            payload['key'] = key
+        
+        if fields:
+            payload['fields'] = fields
+            
+        if operation == 'core/update':
+            payload['comment'] = 'Updated hostname via CSV import script'
+    
+        # Log the API request for debugging
+        logger.info(f"API Request to {url}")
+        logger.info(f"Payload: {json.dumps(payload)}")
+        
+        try:
+            # Try both formats for each version
+            try_formats = [
+                # First try normal JSON
+                {"method": "json", "params": {"json": payload, "verify": verify_ssl}},
+                # Then try with explicit Content-Type header
+                {"method": "json_header", "params": {"json": payload, "headers": {'Content-Type': 'application/json'}, "verify": verify_ssl}},
+                # Finally try form-encoded with json_data parameter
+                {"method": "form", "params": {"data": {'json_data': json.dumps(payload)}, "verify": verify_ssl}}
+            ]
+            
+            for fmt in try_formats:
+                try:
+                    logger.info(f"Trying request format: {fmt['method']}")
+                    response = requests.post(url, **fmt['params'])
+                    
+                    # Log response
+                    logger.info(f"HTTP Status Code: {response.status_code}")
+                    logger.info(f"Raw API response: {response.text}")
+                    
+                    # Check HTTP status
+                    response.raise_for_status()
+                    
+                    try:
+                        json_response = response.json()
+                        
+                        # If we get a successful response (code 0), return it immediately
+                        if 'code' in json_response and json_response['code'] == 0:
+                            logger.info(f"Success with API version {current_version} using {fmt['method']} format")
+                            return json_response
+                        
+                        # Store response for later diagnosis
+                        last_response = json_response
+                    except json.JSONDecodeError:
+                        logger.error(f"Failed to decode JSON with version {current_version} and {fmt['method']} format")
+                        continue
+                except Exception as e:
+                    logger.error(f"Request failed with version {current_version} and {fmt['method']} format: {e}")
+                    last_exception = e
+                    continue
+        except Exception as e:
+            logger.error(f"Error trying API version {current_version}: {e}")
+            last_exception = e
+            continue
+    
+    # If we got here, all versions failed
+    logger.error("All API versions failed. Checking credentials separately...")
+    
+    # Run a simplified diagnostic query just to check authentication
+    diag_payload = {
+        'version': '1.3',
         'auth': {
             'user': username,
             'password': password
         },
-        'operation': operation,
-        'class': class_name,
+        'operation': 'core/check_credentials'
     }
     
-    if key:
-        payload['key'] = key
-    
-    if fields:
-        payload['fields'] = fields
-        
-    if operation == 'core/update':
-        payload['comment'] = 'Updated hostname via CSV import script'
-    
-    # Log the API request for debugging
-    logger.info(f"API Request to {url}")
-    logger.info(f"Payload: {json.dumps(payload)[:500]}..." if len(json.dumps(payload)) > 500 else json.dumps(payload))
-    
     try:
-        response = requests.post(url, json=payload, verify=verify_ssl)
-        # Log the raw response for debugging
-        logger.debug(f"Raw API response: {response.text[:500]}..." if len(response.text) > 500 else response.text)
-        response.raise_for_status()
-        json_response = response.json()
-        return json_response
-    except requests.exceptions.RequestException as e:
-        logger.error(f"API call failed: {e}")
-        logger.error(f"URL: {url}")
-        # Try to get the response content if available
-        try:
-            if hasattr(e, 'response') and e.response is not None:
-                logger.error(f"Response status code: {e.response.status_code}")
-                logger.error(f"Response content: {e.response.text[:500]}")
-        except:
-            pass
-        return None
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to decode JSON response from iTop: {e}")
-        logger.error(f"Response text: {response.text[:500]}..." if len(response.text) > 500 else response.text)
-        return None
+        diag_response = requests.post(url, json=diag_payload, verify=verify_ssl)
+        logger.info(f"Diagnostic credentials check: HTTP {diag_response.status_code}")
+        logger.info(f"Response: {diag_response.text}")
+        
+        # Try to parse the response
+        if diag_response.status_code == 200:
+            try:
+                diag_json = diag_response.json()
+                if 'code' in diag_json and diag_json['code'] == 0:
+                    logger.error("Authentication is working but the API call failed. This suggests issues with the parameters or query format.")
+                else:
+                    logger.error(f"Authentication check failed with code {diag_json.get('code')}: {diag_json.get('message', 'Unknown error')}")
+            except:
+                logger.error("Could not parse authentication check response")
+    except Exception as diag_error:
+        logger.error(f"Diagnostic request failed: {diag_error}")
+    
+    # Return the last response we got, even if it was an error
+    if last_response is not None:
+        return last_response
+    
+    # If we didn't get any valid response, return a fabricated error
+    return {'code': 99, 'message': f"Failed to connect to iTop API after trying multiple versions and formats: {last_exception}"}
 
 def check_api_connection(url, username, password, verify_ssl=False):
     """
