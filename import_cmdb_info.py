@@ -150,50 +150,41 @@ def call_itop_api(operation: str, class_name: str = None, key=None, fields=None,
         return None
 
 
-def search_itop(name: str, ip: str = None) -> Dict:
+def search_itop_by_ip(ip: str) -> Dict:
     """
-    Searches for a machine in iTop by name or IP.
+    Searches for a machine in iTop by IP only.
     Returns the iTop object data if found, None otherwise.
     """
-    logger.info(f"Searching iTop for machine: {name} {f'({ip})' if ip else ''}")
+    logger.info(f"Searching iTop for machine with IP: {ip}")
     
-    # Build OQL query to search by name or IP
-    conditions = []
-    if name:
-        # Use LIKE for case-insensitive search
-        conditions.append(f"name LIKE '{name}'")
-    if ip:
-        conditions.append(f"managementip = '{ip}'")
-    
-    if not conditions:
-        logger.warning("No search criteria provided")
+    if not ip:
+        logger.warning("No IP address provided for search")
         return None
-        
-    # Use OR to match either condition
-    condition_str = ' OR '.join(conditions)
+    
+    # Create query to search by IP only
+    condition_str = f"managementip = '{ip}'"
     
     # Try Server class first
-    logger.debug(f"Searching in Server class")
+    logger.debug(f"Searching in Server class with IP: {ip}")
     oql_query = f"SELECT Server WHERE {condition_str}"
-    logger.debug(f"OQL Query: {oql_query}")
     
     # Call the API
     result = call_itop_api(
         operation='core/get',
         class_name='Server',
         key=oql_query,
-        output_fields='id, name, managementip, org_id, osfamily_id, osversion_id, owner_id, description'
+        output_fields='id, name, managementip'
     )
     
     # If not found as Server, try VirtualMachine
     if not result or not result.get('objects') or len(result.get('objects', {})) == 0:
-        logger.debug("Not found as Server, trying VirtualMachine")
+        logger.debug(f"Not found as Server, trying VirtualMachine with IP: {ip}")
         oql_query = f"SELECT VirtualMachine WHERE {condition_str}"
         result = call_itop_api(
             operation='core/get',
             class_name='VirtualMachine',
             key=oql_query,
-            output_fields='id, name, managementip, org_id, osfamily_id, osversion_id, owner_id, description'
+            output_fields='id, name, managementip'
         )
     
     # Check if any objects were found
@@ -201,7 +192,7 @@ def search_itop(name: str, ip: str = None) -> Dict:
         found_objects = result['objects']
         # Return the first object found
         first_object_id = list(found_objects.keys())[0]
-        logger.info(f"Machine '{name}' found in iTop with ID: {first_object_id}")
+        logger.info(f"Machine with IP '{ip}' found in iTop with ID: {first_object_id}")
         found_object = found_objects[first_object_id]
         # Extract the class name from the key (format is "ClassType::ID")
         class_name = first_object_id.split('::')[0]
@@ -209,7 +200,7 @@ def search_itop(name: str, ip: str = None) -> Dict:
         found_object['itop_key'] = first_object_id  # Add the full key to the returned object
         return found_object
     
-    logger.info(f"Machine '{name}' not found in iTop")
+    logger.info(f"Machine with IP '{ip}' not found in iTop")
     return None
 
 
@@ -447,26 +438,18 @@ def determine_organization(fqdn: str) -> str:
 
 def validate_excel_data(df: pd.DataFrame) -> bool:
     """
-    Validate the Excel data to ensure it has all required columns
+    Simplified validation - only check for IP column
     """
-    required_columns = [
-        'FQDN', 'IP', 'OS Name', 'OS Version', 
-        'Organization', 'Owner', 'Environment', 'Function'
-    ]
-    
-    # Check if all required columns are present
-    missing_columns = [col for col in required_columns if col not in df.columns]
-    if missing_columns:
-        logger.error(f"Missing required columns in Excel file: {missing_columns}")
+    # Only check for IP column
+    if 'IP' not in df.columns:
+        logger.error("Missing required IP column in Excel file")
         return False
     
-    # Check for empty values in critical columns
-    empty_fqdn = df['FQDN'].isna().sum()
+    # Check for empty IP values
     empty_ip = df['IP'].isna().sum()
-    
-    if empty_fqdn > 0 or empty_ip > 0:
-        logger.error(f"Found {empty_fqdn} empty FQDN values and {empty_ip} empty IP values")
-        logger.error("FQDN and IP are required fields and cannot be empty")
+    if empty_ip > 0:
+        logger.error(f"Found {empty_ip} empty IP values")
+        logger.error("IP is a required field and cannot be empty")
         return False
     
     logger.info("Excel data validation passed")
@@ -476,6 +459,7 @@ def validate_excel_data(df: pd.DataFrame) -> bool:
 def process_excel(excel_file_path: str, sheet_name: str = None) -> None:
     """
     Process the Excel file and import/update servers in iTop
+    Simplified to just check if machine exists by IP and update all fields
     """
     try:
         # Read Excel file
@@ -486,7 +470,7 @@ def process_excel(excel_file_path: str, sheet_name: str = None) -> None:
             
         logger.info(f"Read {len(df)} rows from Excel file")
         
-        # Validate data
+        # Validate data - only checks for IP column
         if not validate_excel_data(df):
             logger.error("Excel data validation failed, aborting import")
             return
@@ -495,135 +479,97 @@ def process_excel(excel_file_path: str, sheet_name: str = None) -> None:
         created_count = 0
         updated_count = 0
         skipped_count = 0
-        error_count = 0
         
         # Process each row
         for index, row in df.iterrows():
             try:
-                logger.info(f"Processing row {index + 1}: {row['FQDN']}")
-                
-                fqdn = row['FQDN'].strip()
-                ip = row['IP'].strip()
-                
-                # Step 1: Verify FQDN-IP match - Always returns True now as DNS verification is disabled
-                if not verify_fqdn_ip_match(fqdn, ip):
-                    logger.warning(f"FQDN-IP mismatch: {fqdn} - {ip}, skipping")
+                # Get IP address from row
+                if pd.isna(row['IP']):
+                    logger.warning(f"Skipping row {index + 1} - missing IP address")
                     skipped_count += 1
                     continue
+                    
+                ip = row['IP'].strip()
+                logger.info(f"Processing row {index + 1} with IP: {ip}")
                 
-                # Step 2: Check if server exists in iTop
-                existing_server = search_itop(fqdn, ip)
+                # Check if machine exists by IP
+                existing_server = search_itop_by_ip(ip)
                 
-                # Get the required IDs
-                organization_name = row.get('Organization', determine_organization(fqdn))
-                org_id = get_organization_id(organization_name)
+                # Prepare data dictionary from all available columns
+                server_data = {}
                 
-                os_name = row.get('OS Name', '')
-                os_family_id = get_os_family_id(os_name)
+                # Add all columns from Excel as fields, skipping empty values
+                for col in df.columns:
+                    if col != 'IP' and not pd.isna(row[col]):  # Skip IP as we already have it
+                        # Map Excel column names to iTop field names
+                        itop_field = col.lower().replace(' ', '_')  # Convert spaces to underscores
+                        server_data[itop_field] = str(row[col])
                 
-                os_version = row.get('OS Version', '')
-                os_version_id = get_os_version_id(os_version)
+                # Always include IP address
+                server_data['managementip'] = ip
                 
-                owner_name = row.get('Owner', '')
-                owner_id = get_person_id(owner_name)
+                # If FQDN exists, use it for name
+                if 'FQDN' in df.columns and not pd.isna(row['FQDN']):
+                    server_data['name'] = row['FQDN'].strip()
                 
-                # Check for required IDs
-                if not org_id:
-                    logger.error(f"Failed to get organization ID for {organization_name}, skipping {fqdn}")
-                    error_count += 1
-                    continue
+                # Handle special fields that need ID lookups
+                if 'Organization' in df.columns and not pd.isna(row['Organization']):
+                    org_id = get_organization_id(row['Organization'])
+                    if org_id:
+                        server_data['org_id'] = org_id
                 
-                if not os_family_id and os_name:
-                    logger.error(f"Failed to get OS Family ID for {os_name}, skipping {fqdn}")
-                    error_count += 1
-                    continue
+                if 'OS Name' in df.columns and not pd.isna(row['OS Name']):
+                    os_family_id = get_os_family_id(row['OS Name'])
+                    if os_family_id:
+                        server_data['osfamily_id'] = os_family_id
                 
-                if not os_version_id and os_version:
-                    logger.error(f"Failed to get OS Version ID for {os_version}, skipping {fqdn}")
-                    error_count += 1
-                    continue
+                if 'OS Version' in df.columns and not pd.isna(row['OS Version']):
+                    os_version_id = get_os_version_id(row['OS Version'])
+                    if os_version_id:
+                        server_data['osversion_id'] = os_version_id
                 
-                # Prepare common data for both create and update
-                server_data = {
-                    'name': fqdn,
-                    'managementip': ip
-                }
+                if 'Owner' in df.columns and not pd.isna(row['Owner']):
+                    owner_id = get_person_id(row['Owner'])
+                    if owner_id:
+                        server_data['owner_id'] = owner_id
                 
-                # Add organization if available
-                if org_id:
-                    server_data['org_id'] = org_id
-                
-                # Add OS family and version if available
-                if os_family_id:
-                    server_data['osfamily_id'] = os_family_id
-                if os_version_id:
-                    server_data['osversion_id'] = os_version_id
-                
-                # Add owner if available
-                if owner_id:
-                    server_data['owner_id'] = owner_id
-                
-                # Add description from Function field if available
-                if 'Function' in row and not pd.isna(row['Function']):
-                    server_data['description'] = str(row['Function'])
-                
-                # Add custom fields if they exist in the row
-                for field_name in CUSTOM_FIELDS:
-                    if field_name in row and not pd.isna(row[field_name]):
-                        # Convert custom field name to lowercase for iTop API compatibility
-                        itop_field_name = field_name.lower()
-                        server_data[itop_field_name] = str(row[field_name])
-                
-                # If server exists, update it
+                # If machine exists, update it
                 if existing_server:
                     server_class = existing_server['class']
                     server_key = existing_server['itop_key']
                     
-                    # Call update function
+                    logger.info(f"Updating {server_class} with IP {ip}")
                     update_result = update_itop_server(server_class, server_key, server_data)
                     
                     if update_result and update_result.get('code') == 0:
-                        logger.info(f"Successfully updated {server_class} {fqdn} in iTop")
+                        logger.info(f"Successfully updated machine with IP {ip} in iTop")
                         updated_count += 1
                     else:
-                        logger.error(f"Failed to update {server_class} {fqdn} in iTop")
-                        error_count += 1
+                        logger.error(f"Failed to update machine with IP {ip} in iTop")
+                        skipped_count += 1
                 else:
-                    # Server doesn't exist, create it
-                    # Determine server type
-                    server_type = determine_server_type(fqdn)
+                    # If machine doesn't exist, determine the server type based on FQDN if available
+                    server_type = "Server"  # Default type
+                    if 'FQDN' in df.columns and not pd.isna(row['FQDN']):
+                        server_type = determine_server_type(row['FQDN'])
                     
-                    # Add CPU, Memory, and Storage if available for new servers
-                    if 'CPU' in row and not pd.isna(row['CPU']):
-                        server_data['cpu'] = str(row['CPU'])
-                    if 'Memory' in row and not pd.isna(row['Memory']):
-                        server_data['ram'] = str(row['Memory'])
-                    if 'Storage' in row and not pd.isna(row['Storage']):
-                        server_data['diskspace'] = str(row['Storage'])
-                    
-                    # Add VirtualHost for VirtualMachine type only
-                    if server_type == "VirtualMachine" and 'VirtualHost' in row and not pd.isna(row['VirtualHost']):
-                        virtualhost_name = row['VirtualHost']
-                        server_data['virtualhost_id'] = f"SELECT VirtualHost WHERE name = '{virtualhost_name}'"
-                    
-                    # Create server in iTop
+                    logger.info(f"Creating new {server_type} with IP {ip}")
                     create_result = create_itop_server(server_type, server_data)
                     
                     if create_result and create_result.get('code') == 0:
-                        logger.info(f"Successfully created {server_type} {fqdn} in iTop")
+                        logger.info(f"Successfully created {server_type} with IP {ip} in iTop")
                         created_count += 1
                     else:
-                        error_msg = create_result.get('message', 'Unknown error') if create_result else 'API call failed'
-                        logger.error(f"Failed to create {server_type} {fqdn} in iTop: {error_msg}")
-                        error_count += 1
+                        logger.error(f"Failed to create machine with IP {ip} in iTop")
+                        skipped_count += 1
             
             except Exception as e:
                 logger.exception(f"Error processing row {index + 1}: {e}")
-                error_count += 1
+                skipped_count += 1
         
         # Report summary
-        logger.info(f"Import complete: {created_count} servers created, {updated_count} servers updated, "
-                    f"{skipped_count} skipped, {error_count} errors")
+        logger.info(f"Import complete: {created_count} machines created, {updated_count} machines updated, "
+                    f"{skipped_count} skipped")
         
     except Exception as e:
         logger.exception(f"Failed to process Excel file: {e}")
@@ -663,34 +609,27 @@ def test_itop_connection():
 
 
 def parse_arguments():
-    """Parse command line arguments"""
+    """Parse command line arguments - simplified version"""
     parser = argparse.ArgumentParser(description='iTop Server Import/Update Tool')
     
     # Required arguments
     parser.add_argument('excel_file', help='Path to Excel file containing server data')
     
-    # Optional arguments
-    parser.add_argument('--sheet', help='Excel sheet name to read data from')
+    # Essential optional arguments
     parser.add_argument('--url', help='iTop URL (e.g., https://itop.example.com)')
     parser.add_argument('--user', help='iTop API username')
     parser.add_argument('--password', help='iTop API password')
-    parser.add_argument('--verify-dns', action='store_true', help='Enable DNS verification')
-    parser.add_argument('--debug', action='store_true', help='Enable debug logging')
+    parser.add_argument('--sheet', help='Excel sheet name to read data from')
     
     return parser.parse_args()
 
 
 def main():
-    """Main function"""
+    """Main function - simplified to focus on essential steps"""
     global ITOP_URL, ITOP_API_ENDPOINT, ITOP_USER, ITOP_PWD
     
     # Parse command line arguments
     args = parse_arguments()
-    
-    # Set debug logging if requested
-    if args.debug:
-        logger.setLevel(logging.DEBUG)
-        logger.debug("Debug logging enabled")
     
     # Update global variables from command line arguments if provided
     if args.url:
@@ -703,30 +642,16 @@ def main():
     if args.password:
         ITOP_PWD = args.password
     
-    # Warning about disabled SSL verification
-    logger.warning("SSL certificate verification is disabled. This is insecure and should only be used in test environments.")
-    
-    # Warning about disabled DNS verification
-    if not args.verify_dns:
-        logger.warning("DNS verification has been disabled. Machine names and IPs are not being validated.")
-    
     try:
-        # Log important configuration
         logger.info(f"Using iTop REST API at: {ITOP_API_ENDPOINT}")
-        logger.info(f"API version: {ITOP_VERSION}")
         logger.info(f"Using username: {ITOP_USER}")
         logger.info(f"Processing Excel file: {args.excel_file}")
         
-        # Test connection first
-        if test_itop_connection():
-            # Process Excel file
-            process_excel(args.excel_file, args.sheet)
-        else:
-            logger.error("Unable to continue due to iTop connection issues")
-            sys.exit(1)
+        # Process Excel file directly - minimal controls
+        process_excel(args.excel_file, args.sheet)
         
     except Exception as e:
-        logger.exception(f"An error occurred: {e}")
+        logger.exception(f"Error processing Excel file: {e}")
         sys.exit(1)
 
 
