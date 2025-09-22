@@ -172,17 +172,23 @@ def search_itop_by_ip(ip: str) -> Dict:
         logger.warning("No IP address provided for search")
         return None
     
-    # Create query to search by IP only
-    condition_str = f"managementip = '{ip}'"
+    # Sanitize IP address for search - remove any whitespace and ensure it's clean
+    ip = ip.strip()
+    logger.info(f"Sanitized IP for search: '{ip}'")
     
-    # Try Server class first
+    # Try multiple search methods to ensure we find the server
+    condition_str = f"managementip = '{ip}'"  # Exact match with equals
+    condition_str_like = f"managementip LIKE '{ip}'"  # LIKE match for case insensitivity
+    
+    # Try Server class first with exact match
     logger.info(f"Searching in Server class with IP: {ip}")
     oql_query = f"SELECT Server WHERE {condition_str}"
+    logger.info(f"Server search query (exact): {oql_query}")
     
     # Get all important fields
     output_fields = 'id, name, managementip, org_id, osfamily_id, osversion_id, ownerorg, description, brand_id, model_id'
     
-    # Call the API
+    # Call the API with exact match
     result = call_itop_api(
         operation='core/get',
         class_name='Server',
@@ -190,16 +196,70 @@ def search_itop_by_ip(ip: str) -> Dict:
         output_fields=output_fields
     )
     
+    # If exact match fails, try LIKE match
+    if not result or not result.get('objects') or len(result.get('objects', {})) == 0:
+        logger.info("Exact match failed, trying LIKE match for Server")
+        oql_query = f"SELECT Server WHERE {condition_str_like}"
+        logger.info(f"Server search query (LIKE): {oql_query}")
+        
+        result = call_itop_api(
+            operation='core/get',
+            class_name='Server',
+            key=oql_query,
+            output_fields=output_fields
+        )
+    
+    # Log the response content for debugging
+    if result:
+        logger.info(f"Server search result code: {result.get('code')}")
+        if 'objects' in result:
+            logger.info(f"Server objects found: {len(result['objects'])}")
+            if result['objects']:
+                logger.info(f"Found Server objects: {list(result['objects'].keys())}")
+        else:
+            logger.info("No 'objects' key in result")
+    else:
+        logger.warning("Server search returned None result")
+    
     # If not found as Server, try VirtualMachine
     if not result or not result.get('objects') or len(result.get('objects', {})) == 0:
         logger.info(f"Not found as Server, trying VirtualMachine with IP: {ip}")
+        
+        # Try exact match for VirtualMachine
         oql_query = f"SELECT VirtualMachine WHERE {condition_str}"
+        logger.info(f"VirtualMachine search query (exact): {oql_query}")
+        
         result = call_itop_api(
             operation='core/get',
             class_name='VirtualMachine',
             key=oql_query,
             output_fields=output_fields
         )
+        
+        # If exact match fails, try LIKE match for VirtualMachine
+        if not result or not result.get('objects') or len(result.get('objects', {})) == 0:
+            logger.info("Exact match failed, trying LIKE match for VirtualMachine")
+            oql_query = f"SELECT VirtualMachine WHERE {condition_str_like}"
+            logger.info(f"VirtualMachine search query (LIKE): {oql_query}")
+            
+            result = call_itop_api(
+                operation='core/get',
+                class_name='VirtualMachine',
+                key=oql_query,
+                output_fields=output_fields
+            )
+        
+        # Log the VirtualMachine search results
+        if result:
+            logger.info(f"VirtualMachine search result code: {result.get('code')}")
+            if 'objects' in result:
+                logger.info(f"VirtualMachine objects found: {len(result['objects'])}")
+                if result['objects']:
+                    logger.info(f"Found VirtualMachine objects: {list(result['objects'].keys())}")
+            else:
+                logger.info("No 'objects' key in VirtualMachine result")
+        else:
+            logger.warning("VirtualMachine search returned None result")
     
     # Check if any objects were found
     if result and result.get('objects') and len(result.get('objects', {})) > 0:
@@ -620,12 +680,24 @@ def process_csv(file_path: str) -> None:
                 # Always include IP address
                 server_data['managementip'] = ip
                 
-                # If machine exists, update it
+                # Critical decision point: Update vs Create
+                # Add extensive debugging to verify why machines are being created instead of updated
+                logger.info("=== UPDATE VS CREATE DECISION POINT ====")
+                
                 if existing_server:
+                    logger.info(f"EXISTING SERVER FOUND - WILL UPDATE: {existing_server['itop_key']}")
+                    logger.info(f"Existing server details: {json.dumps(existing_server, indent=2, default=str)}")
+                    
                     server_class = existing_server['class']
                     server_key = existing_server['itop_key']
                     
+                    # Make sure we're using the name from the existing server if none provided
+                    if 'name' not in server_data and 'name' in existing_server:
+                        server_data['name'] = existing_server['name']
+                        logger.info(f"Using existing server name: {server_data['name']}")
+                    
                     logger.info(f"Updating {server_class} with IP {ip}")
+                    logger.info(f"Fields to update: {list(server_data.keys())}")
                     update_result = update_itop_server(server_class, server_key, server_data)
                     
                     if update_result and update_result.get('code') == 0:
@@ -635,10 +707,19 @@ def process_csv(file_path: str) -> None:
                         logger.error(f"Failed to update machine with IP {ip} in iTop")
                         skipped_count += 1
                 else:
+                    logger.warning(f"NO EXISTING SERVER FOUND WITH IP {ip} - WILL CREATE NEW")
+                    logger.warning("If this is unexpected, verify the IP addresses in iTop match the CSV exactly")
+                    logger.warning("Check the logs above for search details and possible API errors")
+                    
                     # If machine doesn't exist, determine the server type based on FQDN if available
                     server_type = "Server"  # Default type
                     if 'FQDN' in df.columns and not pd.isna(row['FQDN']):
                         server_type = determine_server_type(row['FQDN'])
+                    
+                    # Ensure we have required fields for creation
+                    if 'name' not in server_data:
+                        server_data['name'] = ip  # Use IP as name if no name provided
+                        logger.warning(f"No name provided for new server, using IP as name: {ip}")
                     
                     logger.info(f"Creating new {server_type} with IP {ip}")
                     create_result = create_itop_server(server_type, server_data)
