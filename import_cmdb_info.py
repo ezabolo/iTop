@@ -108,9 +108,12 @@ def call_itop_api(operation: str, class_name: str = None, key=None, fields=None,
     }
     
     # Log the request details
-    logger.debug(f"API Request to {ITOP_API_ENDPOINT}")
-    logger.debug(f"Operation: {operation}, Class: {class_name}")
-    logger.debug(f"JSON Data: {json.dumps(json_data, indent=2, default=str)}")
+    logger.info(f"API Request to {ITOP_API_ENDPOINT}")
+    logger.info(f"Operation: {operation}, Class: {class_name}")
+    if operation == 'core/update':
+        logger.info(f"Update key: {key}")
+        logger.info(f"Update fields: {json.dumps(fields, indent=2, default=str)}")
+    logger.info(f"JSON Data: {json.dumps(json_data, indent=2, default=str)}")
     
     try:
         # Make the API request with SSL verification disabled
@@ -122,9 +125,9 @@ def call_itop_api(operation: str, class_name: str = None, key=None, fields=None,
         )
         
         # Log response details
-        logger.debug(f"Response status: {response.status_code}")
+        logger.info(f"Response status: {response.status_code}")
         logger.debug(f"Response headers: {response.headers}")
-        logger.debug(f"Response text: {response.text[:200]}..." if len(response.text) > 200 else response.text)
+        logger.info(f"Response text: {response.text[:500]}..." if len(response.text) > 500 else response.text)
         
         # Raise exception for bad status codes
         response.raise_for_status()
@@ -166,26 +169,29 @@ def search_itop_by_ip(ip: str) -> Dict:
     condition_str = f"managementip = '{ip}'"
     
     # Try Server class first
-    logger.debug(f"Searching in Server class with IP: {ip}")
+    logger.info(f"Searching in Server class with IP: {ip}")
     oql_query = f"SELECT Server WHERE {condition_str}"
+    
+    # Get all important fields
+    output_fields = 'id, name, managementip, org_id, osfamily_id, osversion_id, ownerorg, description, brand_id, model_id'
     
     # Call the API
     result = call_itop_api(
         operation='core/get',
         class_name='Server',
         key=oql_query,
-        output_fields='id, name, managementip'
+        output_fields=output_fields
     )
     
     # If not found as Server, try VirtualMachine
     if not result or not result.get('objects') or len(result.get('objects', {})) == 0:
-        logger.debug(f"Not found as Server, trying VirtualMachine with IP: {ip}")
+        logger.info(f"Not found as Server, trying VirtualMachine with IP: {ip}")
         oql_query = f"SELECT VirtualMachine WHERE {condition_str}"
         result = call_itop_api(
             operation='core/get',
             class_name='VirtualMachine',
             key=oql_query,
-            output_fields='id, name, managementip'
+            output_fields=output_fields
         )
     
     # Check if any objects were found
@@ -240,17 +246,40 @@ def update_itop_server(server_class: str, server_id: str, update_data: Dict) -> 
     Updates an existing server or virtual machine in iTop.
     """
     logger.info(f"Updating {server_class} in iTop with ID: {server_id}")
-    logger.debug(f"Update data: {json.dumps(update_data, indent=2, default=str)}")
+    logger.info(f"Original update data: {json.dumps(update_data, indent=2, default=str)}")
     
-    # Call the API to update the object
-    result = call_itop_api(
-        operation='core/update',
-        class_name=server_class,
-        key=server_id,
-        fields=update_data,
-        comment='Updated via CSV import script',
-        output_fields='id, name, managementip, org_id, osfamily_id, osversion_id, ownerorg'
-    )
+    # Clean up the update data to avoid format issues
+    cleaned_data = {}
+    for key, value in update_data.items():
+        # Skip empty values
+        if value is None or value == "":
+            continue
+            
+        # Ensure all values are strings to avoid JSON formatting issues
+        cleaned_data[key] = str(value).strip()
+    
+    # Extract numeric ID from the server_id string (format is typically 'ClassType::ID')
+    try:
+        if '::' in server_id:
+            numeric_id = int(server_id.split('::')[1])
+        else:
+            # If we already have just the numeric ID, convert it to int
+            numeric_id = int(server_id)
+            
+        logger.info(f"Cleaned update data: {json.dumps(cleaned_data, indent=2)}")
+        
+        # Call the API to update the object using the cleaned data
+        result = call_itop_api(
+            operation='core/update',
+            class_name=server_class,
+            key=numeric_id,  # Use numeric ID for the key
+            fields=cleaned_data,
+            comment='Updated via CSV import script',
+            output_fields='id, name, managementip, org_id, osfamily_id, osversion_id, ownerorg'
+        )
+    except ValueError as e:
+        logger.error(f"Invalid server ID format: {server_id}. Error: {e}")
+        return None
     
     if result and result.get('code') == 0:
         logger.info(f"Successfully updated {server_class} with ID: {server_id}")
@@ -476,12 +505,21 @@ def process_csv(file_path: str) -> None:
                 # Prepare data dictionary from all available columns
                 server_data = {}
                 
-                # Add all columns from Excel as fields, skipping empty values
+                # Define a list of special fields that need special handling
+                special_fields = ['IP', 'FQDN', 'Organization', 'OS Name', 'OS Version', 'Owner']
+                
+                # Add columns from CSV as fields, skipping empty values and special fields
                 for col in df.columns:
-                    if col != 'IP' and not pd.isna(row[col]):  # Skip IP as we already have it
-                        # Map Excel column names to iTop field names
+                    if col not in special_fields and not pd.isna(row[col]):
+                        # Map CSV column names to iTop field names (lowercase, underscores)
                         itop_field = col.lower().replace(' ', '_')  # Convert spaces to underscores
-                        server_data[itop_field] = str(row[col])
+                        
+                        # Sanitize the value - ensure it's a string and strip whitespace
+                        value = str(row[col]).strip()
+                        
+                        # Only add non-empty values
+                        if value:
+                            server_data[itop_field] = value
                 
                 # Always include IP address
                 server_data['managementip'] = ip
