@@ -216,8 +216,8 @@ def create_itop_server(server_type: str, server_data: Dict) -> Dict:
         operation='core/create',
         class_name=server_type,
         fields=server_data,
-        comment='Created via Excel import script',
-        output_fields='id, name, managementip, org_id, osfamily_id, osversion_id, owner_id'
+        comment='Created via CSV import script',
+        output_fields='id, name, managementip, org_id, osfamily_id, osversion_id, ownerorg'
     )
     
     if result and result.get('code') == 0:
@@ -248,8 +248,8 @@ def update_itop_server(server_class: str, server_id: str, update_data: Dict) -> 
         class_name=server_class,
         key=server_id,
         fields=update_data,
-        comment='Updated via Excel import script',
-        output_fields='id, name, managementip, org_id, osfamily_id, osversion_id, owner_id'
+        comment='Updated via CSV import script',
+        output_fields='id, name, managementip, org_id, osfamily_id, osversion_id, ownerorg'
     )
     
     if result and result.get('code') == 0:
@@ -383,31 +383,8 @@ def get_os_version_id(os_version: str) -> str:
     return ""
 
 
-def get_person_id(owner_name: str) -> str:
-    """
-    Get the ID of a person by name
-    """
-    if not owner_name:
-        return ""
-        
-    # For person lookup via OQL query
-    # We search by both first name and last name
-    oql_query = f"SELECT Person WHERE name LIKE '%{owner_name}%' OR first_name LIKE '%{owner_name}%'"
-    result = call_itop_api(
-        operation='core/get',
-        class_name='Person',
-        key=oql_query
-    )
-    
-    if result and result.get('objects'):
-        # Sort by ID and take the lowest
-        person_ids = [int(obj_id.split('::')[1]) for obj_id in result['objects']]
-        found_id = str(min(person_ids))
-        logger.info(f"Found person '{owner_name}' with ID: {found_id}")
-        return found_id
-    
-    logger.warning(f"Person '{owner_name}' not found in iTop")
-    return ""
+# Note: The get_person_id function has been removed as we now use ownerorg instead of owner_id
+# Owner field in CSV now refers to an organization, not a person
 
 
 def verify_fqdn_ip_match(fqdn: str, ip: str) -> bool:
@@ -529,10 +506,12 @@ def process_csv(file_path: str) -> None:
                     if os_version_id:
                         server_data['osversion_id'] = os_version_id
                 
+                # Handle Owner as ownerorg (organization) instead of person ID
                 if 'Owner' in df.columns and not pd.isna(row['Owner']):
-                    owner_id = get_person_id(row['Owner'])
-                    if owner_id:
-                        server_data['owner_id'] = owner_id
+                    # For ownerorg, we expect an organization name or ID
+                    ownerorg_id = get_organization_id(row['Owner'])
+                    if ownerorg_id:
+                        server_data['ownerorg'] = ownerorg_id
                 
                 # If machine exists, update it
                 if existing_server:
