@@ -2,8 +2,8 @@
 """
 iTop Advanced Server Import/Update Tool
 
-This script reads server information from an Excel file and imports/updates it into iTop.
-It can update existing servers or create new ones if they don't exist.
+This script reads server information from a CSV file and imports/updates it into iTop.
+It checks if machines exist in iTop by IP address and updates all fields from the file.
 """
 
 import sys
@@ -11,6 +11,7 @@ import json
 import logging
 import argparse
 import pandas as pd
+import csv
 import dns.resolver
 import requests
 import socket
@@ -436,13 +437,13 @@ def determine_organization(fqdn: str) -> str:
     return "CMSO"  # Default organization
 
 
-def validate_excel_data(df: pd.DataFrame) -> bool:
+def validate_csv_data(df: pd.DataFrame) -> bool:
     """
     Simplified validation - only check for IP column
     """
     # Only check for IP column
     if 'IP' not in df.columns:
-        logger.error("Missing required IP column in Excel file")
+        logger.error("Missing required IP column in CSV file")
         return False
     
     # Check for empty IP values
@@ -452,27 +453,27 @@ def validate_excel_data(df: pd.DataFrame) -> bool:
         logger.error("IP is a required field and cannot be empty")
         return False
     
-    logger.info("Excel data validation passed")
+    logger.info("CSV data validation passed")
     return True
 
 
-def process_excel(excel_file_path: str, sheet_name: str = None) -> None:
+def process_csv(file_path: str) -> None:
     """
-    Process the Excel file and import/update servers in iTop
+    Process the CSV file and import/update servers in iTop
     Simplified to just check if machine exists by IP and update all fields
     """
     try:
-        # Read Excel file
-        if sheet_name:
-            df = pd.read_excel(excel_file_path, sheet_name=sheet_name)
-        else:
-            df = pd.read_excel(excel_file_path)
-            
-        logger.info(f"Read {len(df)} rows from Excel file")
+        # Read CSV file
+        try:
+            df = pd.read_csv(file_path)
+            logger.info(f"Read {len(df)} rows from CSV file")
+        except Exception as e:
+            logger.error(f"Failed to read CSV file: {e}")
+            return
         
         # Validate data - only checks for IP column
-        if not validate_excel_data(df):
-            logger.error("Excel data validation failed, aborting import")
+        if not validate_csv_data(df):
+            logger.error("CSV data validation failed, aborting import")
             return
         
         # Initialize counters
@@ -609,23 +610,22 @@ def test_itop_connection():
 
 
 def parse_arguments():
-    """Parse command line arguments - simplified version"""
-    parser = argparse.ArgumentParser(description='iTop Server Import/Update Tool')
+    """Parse command line arguments - CSV version"""
+    parser = argparse.ArgumentParser(description='iTop Server Import/Update Tool - CSV Version')
     
     # Required arguments
-    parser.add_argument('excel_file', help='Path to Excel file containing server data')
+    parser.add_argument('csv_file', help='Path to CSV file containing server data')
     
     # Essential optional arguments
     parser.add_argument('--url', help='iTop URL (e.g., https://itop.example.com)')
     parser.add_argument('--user', help='iTop API username')
     parser.add_argument('--password', help='iTop API password')
-    parser.add_argument('--sheet', help='Excel sheet name to read data from')
     
     return parser.parse_args()
 
 
 def main():
-    """Main function - simplified to focus on essential steps"""
+    """Main function - simplified for CSV processing only"""
     global ITOP_URL, ITOP_API_ENDPOINT, ITOP_USER, ITOP_PWD
     
     # Parse command line arguments
@@ -645,13 +645,13 @@ def main():
     try:
         logger.info(f"Using iTop REST API at: {ITOP_API_ENDPOINT}")
         logger.info(f"Using username: {ITOP_USER}")
-        logger.info(f"Processing Excel file: {args.excel_file}")
+        logger.info(f"Processing CSV file: {args.csv_file}")
         
-        # Process Excel file directly - minimal controls
-        process_excel(args.excel_file, args.sheet)
+        # Process CSV file directly - minimal controls
+        process_csv(args.csv_file)
         
     except Exception as e:
-        logger.exception(f"Error processing Excel file: {e}")
+        logger.exception(f"Error processing CSV file: {e}")
         sys.exit(1)
 
 
