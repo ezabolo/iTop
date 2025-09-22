@@ -174,40 +174,24 @@ def search_itop_by_ip(ip: str) -> Dict:
     
     # Sanitize IP address for search - remove any whitespace and ensure it's clean
     ip = ip.strip()
-    logger.info(f"Sanitized IP for search: '{ip}'")
     
-    # Try multiple search methods to ensure we find the server
-    condition_str = f"managementip = '{ip}'"  # Exact match with equals
-    condition_str_like = f"managementip LIKE '{ip}'"  # LIKE match for case insensitivity
+    # Create query to search by IP only - exact match
+    condition_str = f"managementip = '{ip}'"
     
-    # Try Server class first with exact match
+    # Try Server class first
     logger.info(f"Searching in Server class with IP: {ip}")
     oql_query = f"SELECT Server WHERE {condition_str}"
-    logger.info(f"Server search query (exact): {oql_query}")
     
-    # Get all important fields
-    output_fields = 'id, name, managementip, org_id, osfamily_id, osversion_id, ownerorg, description, brand_id, model_id'
+    # Get only essential fields, exclude brand_id and model_id
+    output_fields = 'id, name, managementip, org_id, osfamily_id, osversion_id, ownerorg'
     
-    # Call the API with exact match
+    # Call the API
     result = call_itop_api(
         operation='core/get',
         class_name='Server',
         key=oql_query,
         output_fields=output_fields
     )
-    
-    # If exact match fails, try LIKE match
-    if not result or not result.get('objects') or len(result.get('objects', {})) == 0:
-        logger.info("Exact match failed, trying LIKE match for Server")
-        oql_query = f"SELECT Server WHERE {condition_str_like}"
-        logger.info(f"Server search query (LIKE): {oql_query}")
-        
-        result = call_itop_api(
-            operation='core/get',
-            class_name='Server',
-            key=oql_query,
-            output_fields=output_fields
-        )
     
     # Log the response content for debugging
     if result:
@@ -225,9 +209,8 @@ def search_itop_by_ip(ip: str) -> Dict:
     if not result or not result.get('objects') or len(result.get('objects', {})) == 0:
         logger.info(f"Not found as Server, trying VirtualMachine with IP: {ip}")
         
-        # Try exact match for VirtualMachine
+        # Simple search for VirtualMachine
         oql_query = f"SELECT VirtualMachine WHERE {condition_str}"
-        logger.info(f"VirtualMachine search query (exact): {oql_query}")
         
         result = call_itop_api(
             operation='core/get',
@@ -236,43 +219,35 @@ def search_itop_by_ip(ip: str) -> Dict:
             output_fields=output_fields
         )
         
-        # If exact match fails, try LIKE match for VirtualMachine
-        if not result or not result.get('objects') or len(result.get('objects', {})) == 0:
-            logger.info("Exact match failed, trying LIKE match for VirtualMachine")
-            oql_query = f"SELECT VirtualMachine WHERE {condition_str_like}"
-            logger.info(f"VirtualMachine search query (LIKE): {oql_query}")
-            
-            result = call_itop_api(
-                operation='core/get',
-                class_name='VirtualMachine',
-                key=oql_query,
-                output_fields=output_fields
-            )
-        
         # Log the VirtualMachine search results
         if result:
             logger.info(f"VirtualMachine search result code: {result.get('code')}")
             if 'objects' in result:
-                logger.info(f"VirtualMachine objects found: {len(result['objects'])}")
+                vm_count = 0
                 if result['objects']:
-                    logger.info(f"Found VirtualMachine objects: {list(result['objects'].keys())}")
+                    vm_count = len(result['objects'])
+                logger.info(f"VirtualMachine objects found: {vm_count}")
             else:
                 logger.info("No 'objects' key in VirtualMachine result")
         else:
             logger.warning("VirtualMachine search returned None result")
     
-    # Check if any objects were found
-    if result and result.get('objects') and len(result.get('objects', {})) > 0:
-        found_objects = result['objects']
-        # Return the first object found
-        first_object_id = list(found_objects.keys())[0]
-        logger.info(f"Machine with IP '{ip}' found in iTop with ID: {first_object_id}")
-        found_object = found_objects[first_object_id]
-        # Extract the class name from the key (format is "ClassType::ID")
-        class_name = first_object_id.split('::')[0]
-        found_object['class'] = class_name  # Add the class name to the returned object
-        found_object['itop_key'] = first_object_id  # Add the full key to the returned object
-        return found_object
+    # Check if any objects were found - with careful null checking
+    if result and isinstance(result, dict) and 'objects' in result and result['objects']:
+        try:
+            found_objects = result['objects']
+            # Return the first object found
+            first_object_id = list(found_objects.keys())[0]
+            logger.info(f"Machine with IP '{ip}' found in iTop with ID: {first_object_id}")
+            found_object = found_objects[first_object_id]
+            # Extract the class name from the key (format is "ClassType::ID")
+            class_name = first_object_id.split('::')[0]
+            found_object['class'] = class_name  # Add the class name to the returned object
+            found_object['itop_key'] = first_object_id  # Add the full key to the returned object
+            return found_object
+        except Exception as e:
+            logger.error(f"Error processing search result: {e}")
+            return None
     
     logger.info(f"Machine with IP '{ip}' not found in iTop")
     return None
