@@ -60,14 +60,20 @@ ORG_MAPPING = {
     "CMSO": set()  # Default organization
 }
 
-# Custom field mappings
-CUSTOM_FIELDS = [
-    "AO_Program",
-    "AO_CMECF_Circuit",
-    "AO_CMECF_Court_TYpe",
-    "Environment",
-    "Function"
-]
+# Custom field mappings - map CSV column names to iTop database fields
+FIELD_MAPPINGS = {
+    "AO_Program": "aoprogram",
+    "AO_CMECF_Circuit": "aocmecfcirtcuit", 
+    "AO_CMECF_Court_Type": "aocmecfcourttype",
+    "Function": "functionpurpose",
+    "Environment": "cmsofunction",
+    "OS Name": "osfamily_id",  # These will be mapped to IDs
+    "OS Version": "osversion_id",
+    "Owner": "ownerorg",
+    "Organization": "org_id",
+    "FQDN": "name",
+    "IP": "managementip"
+}
 
 def call_itop_api(operation: str, class_name: str = None, key=None, fields=None, output_fields=None, comment=None) -> Dict:
     """
@@ -505,51 +511,56 @@ def process_csv(file_path: str) -> None:
                 # Prepare data dictionary from all available columns
                 server_data = {}
                 
-                # Define a list of special fields that need special handling
-                special_fields = ['IP', 'FQDN', 'Organization', 'OS Name', 'OS Version', 'Owner']
+                # Log available fields in CSV row for debugging
+                logger.info(f"CSV fields available in row: {list(df.columns)}")
                 
-                # Add columns from CSV as fields, skipping empty values and special fields
-                for col in df.columns:
-                    if col not in special_fields and not pd.isna(row[col]):
-                        # Map CSV column names to iTop field names (lowercase, underscores)
-                        itop_field = col.lower().replace(' ', '_')  # Convert spaces to underscores
+                # Process each column in the CSV row based on field mappings
+                for csv_field, itop_field in FIELD_MAPPINGS.items():
+                    # Skip processing if the field isn't in the CSV or value is empty
+                    if csv_field not in df.columns:
+                        logger.debug(f"Field '{csv_field}' not found in CSV, skipping")
+                        continue
+                    
+                    if pd.isna(row[csv_field]):
+                        logger.debug(f"Field '{csv_field}' is empty, skipping")
+                        continue
                         
-                        # Sanitize the value - ensure it's a string and strip whitespace
-                        value = str(row[col]).strip()
+                    # Get the value and sanitize it
+                    value = str(row[csv_field]).strip()
+                    if not value:  # Skip empty values
+                        logger.debug(f"Field '{csv_field}' has empty value after stripping, skipping")
+                        continue
                         
-                        # Only add non-empty values
-                        if value:
-                            server_data[itop_field] = value
-                
+                    logger.info(f"Processing field '{csv_field}' with value '{value}' -> iTop field '{itop_field}'")
+
+                        
+                    # Handle special fields that need ID lookups
+                    if csv_field == 'Organization':
+                        org_id = get_organization_id(value)
+                        if org_id:
+                            server_data['org_id'] = org_id
+                    elif csv_field == 'Owner':
+                        owner_org_id = get_organization_id(value)
+                        if owner_org_id:
+                            server_data['ownerorg'] = owner_org_id
+                    elif csv_field == 'OS Name':
+                        os_family_id = get_os_family_id(value)
+                        if os_family_id:
+                            server_data['osfamily_id'] = os_family_id
+                    elif csv_field == 'OS Version':
+                        os_version_id = get_os_version_id(value)
+                        if os_version_id:
+                            server_data['osversion_id'] = os_version_id
+                    elif csv_field == 'IP':  # IP is handled separately
+                        continue  # Skip as we already have it
+                    elif csv_field == 'FQDN':  # FQDN maps to name
+                        server_data['name'] = value
+                    else:  # For all other mapped fields
+                        # Use the mapping to get the correct iTop field name
+                        server_data[itop_field] = value
+                        
                 # Always include IP address
                 server_data['managementip'] = ip
-                
-                # If FQDN exists, use it for name
-                if 'FQDN' in df.columns and not pd.isna(row['FQDN']):
-                    server_data['name'] = row['FQDN'].strip()
-                
-                # Handle special fields that need ID lookups
-                if 'Organization' in df.columns and not pd.isna(row['Organization']):
-                    org_id = get_organization_id(row['Organization'])
-                    if org_id:
-                        server_data['org_id'] = org_id
-                
-                if 'OS Name' in df.columns and not pd.isna(row['OS Name']):
-                    os_family_id = get_os_family_id(row['OS Name'])
-                    if os_family_id:
-                        server_data['osfamily_id'] = os_family_id
-                
-                if 'OS Version' in df.columns and not pd.isna(row['OS Version']):
-                    os_version_id = get_os_version_id(row['OS Version'])
-                    if os_version_id:
-                        server_data['osversion_id'] = os_version_id
-                
-                # Handle Owner as ownerorg (organization) instead of person ID
-                if 'Owner' in df.columns and not pd.isna(row['Owner']):
-                    # For ownerorg, we expect an organization name or ID
-                    ownerorg_id = get_organization_id(row['Owner'])
-                    if ownerorg_id:
-                        server_data['ownerorg'] = ownerorg_id
                 
                 # If machine exists, update it
                 if existing_server:
