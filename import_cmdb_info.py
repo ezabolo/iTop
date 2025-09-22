@@ -72,7 +72,8 @@ FIELD_MAPPINGS = {
     "Owner": "ownerorg",
     "Organization": "org_id",
     "FQDN": "name",
-    "IP": "managementip"
+    "IP": "managementip",
+    "VirtualHost": "virtualhost_id"  # Mandatory field for VirtualMachine objects
 }
 
 def call_itop_api(operation: str, class_name: str = None, key=None, fields=None, output_fields=None, comment=None) -> Dict:
@@ -418,6 +419,52 @@ def get_os_version_id(os_version: str) -> str:
     return ""
 
 
+def get_virtualhost_id(virtualhost_name: str) -> str:
+    """
+    Get the ID of a VirtualHost by name.
+    Returns the ID if found, empty string otherwise.
+    """
+    if not virtualhost_name:
+        return ""
+    
+    logger.info(f"Looking up VirtualHost ID for: {virtualhost_name}")
+    
+    # Query for VirtualHost by name
+    oql_query = f"SELECT VirtualHost WHERE name = '{virtualhost_name}'"
+    result = call_itop_api(
+        operation='core/get',
+        class_name='VirtualHost',
+        key=oql_query,
+        output_fields='id, name'
+    )
+    
+    if result and result.get('objects'):
+        # Get the first VirtualHost found
+        first_object_id = list(result['objects'].keys())[0]
+        virtualhost_id = first_object_id.split('::')[1]
+        logger.info(f"Found VirtualHost '{virtualhost_name}' with ID: {virtualhost_id}")
+        return virtualhost_id
+    
+    # Try partial match if exact match failed
+    oql_query = f"SELECT VirtualHost WHERE name LIKE '%{virtualhost_name}%'"
+    result = call_itop_api(
+        operation='core/get',
+        class_name='VirtualHost',
+        key=oql_query,
+        output_fields='id, name'
+    )
+    
+    if result and result.get('objects'):
+        # Get the first VirtualHost found
+        first_object_id = list(result['objects'].keys())[0]
+        virtualhost_id = first_object_id.split('::')[1]
+        logger.info(f"Found VirtualHost containing '{virtualhost_name}' with ID: {virtualhost_id}")
+        return virtualhost_id
+    
+    logger.warning(f"VirtualHost '{virtualhost_name}' not found in iTop")
+    return ""
+
+
 # Note: The get_person_id function has been removed as we now use ownerorg instead of owner_id
 # Owner field in CSV now refers to an organization, not a person
 
@@ -555,6 +602,17 @@ def process_csv(file_path: str) -> None:
                         continue  # Skip as we already have it
                     elif csv_field == 'FQDN':  # FQDN maps to name
                         server_data['name'] = value
+                    elif csv_field == 'VirtualHost':
+                        # Try to get the numeric ID for the VirtualHost
+                        virtualhost_id = get_virtualhost_id(value)
+                        if virtualhost_id:
+                            # Use the numeric ID directly
+                            server_data['virtualhost_id'] = virtualhost_id
+                            logger.info(f"Set virtualhost_id to: {virtualhost_id}")
+                        else:
+                            # Fallback to OQL reference if lookup fails
+                            server_data['virtualhost_id'] = f"SELECT VirtualHost WHERE name = '{value}'"
+                            logger.info(f"Set virtualhost_id to OQL reference: {server_data['virtualhost_id']}")
                     else:  # For all other mapped fields
                         # Use the mapping to get the correct iTop field name
                         server_data[itop_field] = value
