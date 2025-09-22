@@ -182,7 +182,7 @@ def search_itop_by_ip(ip: str) -> Dict:
     logger.info(f"Searching in Server class with IP: {ip}")
     oql_query = f"SELECT Server WHERE {condition_str}"
     
-    # Get only essential fields, exclude brand_id and model_id
+    # Include all fields we need for proper server detection
     output_fields = 'id, name, managementip, org_id, osfamily_id, osversion_id, ownerorg'
     
     # Call the API
@@ -193,23 +193,23 @@ def search_itop_by_ip(ip: str) -> Dict:
         output_fields=output_fields
     )
     
-    # Log the response content for debugging
-    if result:
-        logger.info(f"Server search result code: {result.get('code')}")
-        if 'objects' in result:
-            logger.info(f"Server objects found: {len(result['objects'])}")
-            if result['objects']:
-                logger.info(f"Found Server objects: {list(result['objects'].keys())}")
-        else:
-            logger.info("No 'objects' key in result")
+    # Check if we found a Server
+    server_found = False
+    if result and result.get('code') == 0 and result.get('objects') and len(result.get('objects', {})) > 0:
+        server_found = True
+        logger.info(f"Found Server with IP {ip}")
     else:
-        logger.warning("Server search returned None result")
+        logger.info(f"No Server found with IP {ip}")
+        
+    # Store the server result before trying VirtualMachine
+    server_result = result
     
     # If not found as Server, try VirtualMachine
-    if not result or not result.get('objects') or len(result.get('objects', {})) == 0:
+    vm_found = False
+    if not server_found:
         logger.info(f"Not found as Server, trying VirtualMachine with IP: {ip}")
         
-        # Simple search for VirtualMachine
+        # Search for VirtualMachine
         oql_query = f"SELECT VirtualMachine WHERE {condition_str}"
         
         result = call_itop_api(
@@ -219,34 +219,45 @@ def search_itop_by_ip(ip: str) -> Dict:
             output_fields=output_fields
         )
         
-        # Log the VirtualMachine search results
-        if result:
-            logger.info(f"VirtualMachine search result code: {result.get('code')}")
-            if 'objects' in result:
-                vm_count = 0
-                if result['objects']:
-                    vm_count = len(result['objects'])
-                logger.info(f"VirtualMachine objects found: {vm_count}")
-            else:
-                logger.info("No 'objects' key in VirtualMachine result")
+        # Check if we found a VirtualMachine
+        if result and result.get('code') == 0 and result.get('objects') and len(result.get('objects', {})) > 0:
+            vm_found = True
+            logger.info(f"Found VirtualMachine with IP {ip}")
         else:
-            logger.warning("VirtualMachine search returned None result")
+            logger.info(f"No VirtualMachine found with IP {ip}")
+    else:
+        # If we already found it as a Server, use that result
+        result = server_result
     
-    # Check if any objects were found - with careful null checking
-    if result and isinstance(result, dict) and 'objects' in result and result['objects']:
+    # Process search results - determine which type was found and return it
+    if result and 'objects' in result and result['objects']:
         try:
             found_objects = result['objects']
-            # Return the first object found
+            # Get the first object found
             first_object_id = list(found_objects.keys())[0]
             logger.info(f"Machine with IP '{ip}' found in iTop with ID: {first_object_id}")
             found_object = found_objects[first_object_id]
-            # Extract the class name from the key (format is "ClassType::ID")
-            class_name = first_object_id.split('::')[0]
-            found_object['class'] = class_name  # Add the class name to the returned object
-            found_object['itop_key'] = first_object_id  # Add the full key to the returned object
-            return found_object
+            
+            # Extract class from the key (format: "ClassType::ID")
+            if '::' in first_object_id:
+                class_name = first_object_id.split('::')[0]
+                logger.info(f"Detected machine class: {class_name}")
+                
+                # Set the machine type in the returned object
+                found_object['class'] = class_name
+                found_object['itop_key'] = first_object_id
+                
+                # Log machine details for debugging
+                logger.info(f"Found {class_name} with name: {found_object.get('name', 'unknown')}")
+                return found_object
+            else:
+                logger.error(f"Invalid object ID format: {first_object_id}")
+                return None
         except Exception as e:
             logger.error(f"Error processing search result: {e}")
+            # Print full exception info for debugging
+            import traceback
+            logger.error(traceback.format_exc())
             return None
     
     logger.info(f"Machine with IP '{ip}' not found in iTop")
