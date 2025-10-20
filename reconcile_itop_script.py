@@ -153,7 +153,7 @@ def resolve_csv_mappings(fieldnames: Tuple[str, ...]) -> Dict[str, str]:
     mapping = {
         'fqdn': pick('fqdn'),
         'ip_address': pick('ipaddress', 'ip_addr', 'ip_adress', 'ipaddresss', 'ip'),
-        'ao_branch': pick('aobranch'),
+        # AO_Branch intentionally ignored (field not present in iTop)
         # Handle AO_Applocation misspelling as per request
         'ao_application': pick('aoapplication', 'aoapplocation'),
         'os_name': pick('osname', 'os_name'),
@@ -163,7 +163,8 @@ def resolve_csv_mappings(fieldnames: Tuple[str, ...]) -> Dict[str, str]:
         'provisioned_storage': pick('provisioned_storage', 'provisionedstorage'),
     }
 
-    missing = [k for k, v in mapping.items() if v is None]
+    required_keys = ['fqdn', 'ip_address', 'ao_application', 'os_name', 'os_version', 'cpu', 'memory', 'provisioned_storage']
+    missing = [k for k in required_keys if mapping.get(k) is None]
     if missing:
         print("Error: Missing required CSV columns:", missing)
         print("Detected columns:", list(fieldnames))
@@ -186,7 +187,6 @@ def process_csv_file(csv_path: str, itop: ITopAPI):
             for row in reader:
                 fqdn = (row.get(mapping['fqdn']) or '').strip()
                 ip = (row.get(mapping['ip_address']) or '').strip()
-                ao_branch = (row.get(mapping['ao_branch']) or '').strip()
                 ao_app = (row.get(mapping['ao_application']) or '').strip()
                 os_name = (row.get(mapping['os_name']) or '').strip()
                 os_version = (row.get(mapping['os_version']) or '').strip()
@@ -231,7 +231,6 @@ def process_csv_file(csv_path: str, itop: ITopAPI):
                     'diskspace': convert_storage_to_mb(prov_storage_raw),
                     # Additional custom fields
                     'aoapplication': ao_app,
-                    'aobranch': ao_branch,
                 }
 
                 print(f"\nCreating {machine_class}: {fqdn}")
@@ -247,7 +246,7 @@ def process_csv_file(csv_path: str, itop: ITopAPI):
 
 def main():
     parser = argparse.ArgumentParser(description='Reconcile machines in iTop from CSV (create missing)')
-    parser.add_argument('--csv-file', required=True, help='Path to CSV with headers: FQDN,IP_Address,AO_Branch,AO_Applocation,OS_NAME,OS_Version,CPU,Memory,Provisioned_Storage')
+    parser.add_argument('--csv-file', required=True, help='Path to CSV with headers: FQDN,IP_Address,AO_Applocation,OS_NAME,OS_Version,CPU,Memory,Provisioned_Storage')
     parser.add_argument('--itop-url', required=True, help='iTop base URL, e.g. https://itop.example.com')
     parser.add_argument('--itop-user', required=True, help='iTop username')
     parser.add_argument('--itop-password', required=True, help='iTop password')
