@@ -169,7 +169,10 @@ def resolve_csv_mappings(fieldnames: Tuple[str, ...]) -> Dict[str, str]:
 
 
 def process_csv_file(csv_path: str, itop: ITopAPI):
-    """Process CSV and reconcile machines into iTop."""
+    """Process CSV and reconcile machines into iTop.
+
+    Returns a list of dicts describing created machines.
+    """
     try:
         with open(csv_path, 'r', newline='', encoding='utf-8') as f:
             reader = csv.DictReader(f)
@@ -178,6 +181,8 @@ def process_csv_file(csv_path: str, itop: ITopAPI):
                 sys.exit(1)
 
             mapping = resolve_csv_mappings(tuple(reader.fieldnames))
+
+            created = []
 
             for row in reader:
                 fqdn = (row.get(mapping['fqdn']) or '').strip()
@@ -230,7 +235,24 @@ def process_csv_file(csv_path: str, itop: ITopAPI):
                 }
 
                 print(f"\nCreating {machine_class}: {fqdn}")
-                itop.create_machine(machine_data, machine_class)
+                if itop.create_machine(machine_data, machine_class):
+                    created.append({
+                        'name': fqdn,
+                        'class': machine_class,
+                        'organization': org,
+                        'ip': ip,
+                    })
+
+            # Print summary at end of processing
+            print("\n===== Summary: Machines Created =====")
+            if not created:
+                print("No machines were created.")
+            else:
+                for idx, m in enumerate(created, start=1):
+                    print(f"{idx}. {m['name']} | class={m['class']} | org={m['organization']} | ip={m['ip']}")
+                print(f"Total created: {len(created)}")
+
+            return created
 
     except FileNotFoundError:
         print(f"Error: File not found: {csv_path}")
