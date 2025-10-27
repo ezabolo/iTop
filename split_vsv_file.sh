@@ -17,13 +17,13 @@ usage() {
     echo "Usage: $0 <input_csv_file>"
     echo "Example: $0 data.csv"
     echo ""
-    echo "The script will generate three files named:"
-    echo "final_split_part_01.csv, final_split_part_02.csv, etc."
+    echo "The script will generate three files named using the prefix '${FINAL_OUTPUT_PREFIX}':"
+    echo "${FINAL_OUTPUT_PREFIX}01.csv, ${FINAL_OUTPUT_PREFIX}02.csv, etc."
     exit 1
 }
 
 # Ensure the input file is provided
-if [ -z "$INPUT_FILE" ]; then
+if [ [ -z "$INPUT_FILE" ] ]; then
     usage
 fi
 
@@ -57,6 +57,7 @@ echo "Remainder for last file: $REMAINDER"
 
 # 3. Extract the Header
 echo "Extracting header..."
+# This uses the correct command to get the first line (header)
 head -n 1 "$INPUT_FILE" > "$HEADER_FILE"
 
 # 4. Split the Data (Excluding Header)
@@ -68,11 +69,10 @@ tail -n +2 "$INPUT_FILE" | split -l "$LINES_PER_SPLIT" --numeric-suffixes=1 --ad
 echo "Prepending header to split files..."
 OUTPUT_FILES=()
 
-# Loop through the temporary data files created by 'split'
+# Loop through the temporary data files created by 'split' (e.g., temp_data_chunk_01.csv)
 for temp_file in "${DATA_SPLIT_PREFIX}"*.csv; do
     
-    # Construct the final output filename
-    # Example: split_part_01.csv, split_part_02.csv, etc.
+    # Construct the final output filename (e.g., split_part_01.csv)
     FINAL_FILENAME="${FINAL_OUTPUT_PREFIX}$(echo "$temp_file" | sed "s/$DATA_SPLIT_PREFIX//")"
     
     # Combine the header and the data chunk into the final file
@@ -82,6 +82,8 @@ done
 
 # 6. Clean Up Temporary Files
 echo "Cleaning up temporary files..."
+# This command correctly removes the header file and all temporary data chunks 
+# (e.g., temp_data_chunk_01.csv, temp_data_chunk_02.csv, etc.)
 rm "$HEADER_FILE" "${DATA_SPLIT_PREFIX}"*.csv
 
 # 7. Final Output Confirmation
