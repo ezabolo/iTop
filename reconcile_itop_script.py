@@ -149,7 +149,7 @@ def resolve_csv_mappings(fieldnames: Tuple[str, ...]) -> Dict[str, str]:
         'fqdn': pick('fqdn'),
         'ip_address': pick('ipaddress', 'ip_addr', 'ip_adress', 'ipaddresss', 'ip'),
         'ao_branch': pick('aobranch', 'ao_branch'),
-        # Handle AO_Applocation misspelling as per request
+        # AO_Application (accept legacy misspelling 'AO_Applocation' for compatibility)
         'ao_application': pick('aoapplication', 'aoapplocation'),
         'os_name': pick('osname', 'os_name'),
         'os_version': pick('osversion', 'os_version'),
@@ -261,7 +261,7 @@ def process_csv_file(csv_path: str, itop: ITopAPI):
 
 def main():
     parser = argparse.ArgumentParser(description='Reconcile machines in iTop from CSV (create missing)')
-    parser.add_argument('--csv-file', required=True, help='Path to CSV with headers: FQDN,IP_Address,AO_Branch,AO_Applocation,OS_NAME,OS_Version,CPU,Memory,Provisioned_Storage')
+    parser.add_argument('--csv-file', required=True, help='Path to CSV with headers: FQDN,IP_Address,AO_Branch,AO_Application,OS_NAME,OS_Version,CPU,Memory,Provisioned_Storage')
     parser.add_argument('--itop-url', required=True, help='iTop base URL, e.g. https://itop.example.com')
     parser.add_argument('--itop-user', required=True, help='iTop username')
     parser.add_argument('--itop-password', required=True, help='iTop password')
