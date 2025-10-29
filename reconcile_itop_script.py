@@ -205,34 +205,31 @@ def process_csv_file(csv_path: str, itop: ITopAPI):
                     print(f"Exists, skipping: {fqdn}")
                     continue
 
-                # Resolve OS family and version IDs (lowest ID when multiple)
-                os_family_id = itop.get_lowest_id_from_query(
-                    f"SELECT OSFamily WHERE name = '{os_name}'"
-                ) if os_name else None
-                os_version_id = itop.get_lowest_id_from_query(
-                    f"SELECT OSVersion WHERE name = '{os_version}'"
-                ) if os_version else None
-
-                if not os_family_id or not os_version_id:
-                    print(f"Skipping {fqdn} - OS not found (family='{os_name}', version='{os_version}')")
-                    continue
-
-                # Organization comes from AO_Branch; class defaults to Server
+                # Build OQL references by name for OS fields (as in working curl)
+                # Organization comes from AO_Branch; default to creating VirtualMachine
                 org = ao_branch
-                machine_class = 'Server'
+                machine_class = 'VirtualMachine'
 
                 machine_data = {
                     'name': fqdn,  # FQDN -> name
                     'managementip': ip,  # IP_Address -> managementip
                     'org_id': f"SELECT Organization WHERE name = '{org}'",
-                    'osfamily_id': os_family_id,
-                    'osversion_id': os_version_id,
+                    # Use OQL-by-name lookups to match prior working curl
+                    'osfamily_id': f"SELECT OSFamily WHERE name = '{os_name}'" if os_name else None,
+                    'osversion_id': f"SELECT OSVersion WHERE name = '{os_version}'" if os_version else None,
                     'cpu': cpu,
                     'ram': memory,
                     'diskspace': convert_storage_to_mb(prov_storage_raw),
+                    # Reasonable defaults seen in curl example
+                    'devicetype': 'Virtual Machine',
+                    'status': 'production',
+                    'currentstatus': 'on',
                     # Additional custom fields
                     'aoapplication': ao_app,
                 }
+
+                # Remove None keys to avoid API errors when optional values are missing
+                machine_data = {k: v for k, v in machine_data.items() if v is not None}
 
                 print(f"\nCreating {machine_class}: {fqdn}")
                 if itop.create_machine(machine_data, machine_class):
