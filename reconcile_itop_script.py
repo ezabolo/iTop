@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 import argparse
 import csv
 import json
@@ -158,7 +159,7 @@ def resolve_csv_mappings(fieldnames: Tuple[str, ...]) -> Dict[str, str]:
         'provisioned_storage': pick('provisioned_storage', 'provisionedstorage'),
     }
 
-    required_keys = ['fqdn', 'ip_address', 'ao_branch', 'os_name', 'os_version', 'cpu', 'memory', 'provisioned_storage']
+    required_keys = ['fqdn', 'ip_address', 'ao_branch', 'ao_application', 'os_name', 'os_version', 'cpu', 'memory', 'provisioned_storage']
     missing = [k for k in required_keys if mapping.get(k) is None]
     if missing:
         print("Error: Missing required CSV columns:", missing)
