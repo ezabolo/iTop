@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-#!/usr/bin/env python3
 import argparse
 import csv
 import json
@@ -215,6 +214,7 @@ def process_csv_file(csv_path: str, itop: ITopAPI):
                     'name': fqdn,  # FQDN -> name
                     'managementip': ip,  # IP_Address -> managementip
                     'org_id': f"SELECT Organization WHERE name = '{org}'",
+                    'virtualhost_id': "SELECT VirtualHost WHERE name = 'CMSO-PPS-E'",
                     # Use OQL-by-name lookups to match prior working curl
                     'osfamily_id': f"SELECT OSFamily WHERE name = '{os_name}'" if os_name else None,
                     'osversion_id': f"SELECT OSVersion WHERE name = '{os_version}'" if os_version else None,
