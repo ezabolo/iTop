@@ -42,12 +42,20 @@ class iTOPAPI:
         """Post a payload to iTop REST (form-encoded json_data with Basic Auth)."""
         try:
             headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-            endpoint = f"{self.url}?version={self.version}" if 'version=' not in self.url else self.url
+            # Normalize endpoint: ensure we hit /webservices/rest.php
+            base = self.url
+            if not base.lower().endswith('rest.php'):
+                base = base.rstrip('/') + '/webservices/rest.php'
+            endpoint = base if ('?version=' in base or '&version=' in base) else f"{base}?version={self.version}"
             response = requests.post(
                 endpoint,
                 auth=(self.username, self.password),
                 headers=headers,
-                data={'json_data': json.dumps(payload)},
+                data={
+                    'auth_user': self.username,
+                    'auth_pwd': self.password,
+                    'json_data': json.dumps(payload),
+                },
                 verify=self.verify_ssl,
                 timeout=60,
             )
@@ -55,8 +63,9 @@ class iTOPAPI:
             try:
                 return response.json()
             except Exception:
+                ctype = response.headers.get('Content-Type')
                 preview = (response.text or '')[:500]
-                logger.error(f"Non-JSON response (status {response.status_code}): {preview}")
+                logger.error(f"Non-JSON response (status {response.status_code}, content-type {ctype}) from {endpoint}: {preview}")
                 return None
         except requests.exceptions.RequestException as e:
             logger.error(f"API request failed: {e}")
