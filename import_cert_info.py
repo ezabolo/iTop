@@ -151,7 +151,7 @@ class iTOPAPI:
                     results[obj_id] = obj
         return results
         
-    def update_machine(self, machine_id, machine_class, certrenewaldate=None, currentstartdate=None, currentcertenddate=None):
+    def update_machine(self, machine_id, machine_class, certrenewaldate=None, currentcertstartdate=None, currentcertenddate=None):
         """
         Update the owner and project of a machine.
         
@@ -169,8 +169,8 @@ class iTOPAPI:
         # Add optional certificate-related fields if provided
         if certrenewaldate:
             fields['certrenewaldate'] = certrenewaldate
-        if currentstartdate:
-            fields['currentstartdate'] = currentstartdate
+        if currentcertstartdate:
+            fields['currentcertstartdate'] = currentcertstartdate
         if currentcertenddate:
             fields['currentcertenddate'] = currentcertenddate
 
@@ -284,13 +284,13 @@ def process_csv(csv_file, itop_api):
                         continue
                     logger.info(
                         f"Row {row_num}: Updating {machine_class} key={update_key} name={name} with "
-                        f"certrenewaldate={cert_renewal_date}, currentstartdate={current_cert_start}, currentcertenddate={current_cert_end}"
+                        f"certrenewaldate={cert_renewal_date}, currentcertstartdate={current_cert_start}, currentcertenddate={current_cert_end}"
                     )
                     if itop_api.update_machine(
                         update_key,
                         machine_class,
                         certrenewaldate=cert_renewal_date,
-                        currentstartdate=current_cert_start,
+                        currentcertstartdate=current_cert_start,
                         currentcertenddate=current_cert_end
                     ):
                         success_count += 1
