@@ -32,39 +32,32 @@ class iTOPAPI:
             version (str): iTOP API version (default: '1.3')
             verify_ssl (bool): Whether to verify SSL certificate
         """
-        self.url = url
+        self.url = url.rstrip('/')
         self.username = username
         self.password = password
         self.version = version
         self.verify_ssl = verify_ssl
         
-    def call_operation(self, operation, data):
-        """
-        Call an iTOP API operation.
-        
-        Args:
-            operation (str): The operation to perform ('core/get', 'core/update', etc.)
-            data (dict): The data for the operation
-            
-        Returns:
-            dict: The API response
-        """
-        json_data = {
-            'operation': operation,
-            'auth_login': self.username,
-            'auth_password': self.password,
-            'version': self.version,
-            'json_data': json.dumps(data)
-        }
-        
+    def call_operation(self, payload):
+        """Post a payload to iTop REST (form-encoded json_data with Basic Auth)."""
         try:
+            headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+            endpoint = f"{self.url}?version={self.version}" if 'version=' not in self.url else self.url
             response = requests.post(
-                self.url,
-                data=json_data,
-                verify=self.verify_ssl
+                endpoint,
+                auth=(self.username, self.password),
+                headers=headers,
+                data={'json_data': json.dumps(payload)},
+                verify=self.verify_ssl,
+                timeout=60,
             )
-            response.raise_for_status()
-            return response.json()
+            # Try JSON first; if HTML or other, log a concise preview
+            try:
+                return response.json()
+            except Exception:
+                preview = (response.text or '')[:500]
+                logger.error(f"Non-JSON response (status {response.status_code}): {preview}")
+                return None
         except requests.exceptions.RequestException as e:
             logger.error(f"API request failed: {e}")
             return None
@@ -104,7 +97,7 @@ class iTOPAPI:
                 'output_fields': 'id, friendlyname, ip_address, fqdn, owner_name, project_name'
             }
                 
-            response = self.call_operation('core/get', data)
+            response = self.call_operation(data)
             
             if response and response.get('code') == 0:
                 objects = response.get('objects', {})
@@ -169,7 +162,7 @@ class iTOPAPI:
             'fields': fields
         }
         
-        response = self.call_operation('core/update', data)
+        response = self.call_operation(data)
         
         if not response or response.get('code') != 0:
             logger.error(f"Failed to update {machine_class} {machine_id}: {response.get('message') if response else 'No response'}")
