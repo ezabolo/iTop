@@ -123,7 +123,7 @@ class iTOPAPI:
                 'key': oql,
                 'output_fields': 'id, name'
             }
-            response = self.call_operation('core/get', data)
+            response = self.call_operation(data)
             if response and response.get('code') == 0:
                 objects = response.get('objects', {})
                 for obj_id, obj in objects.items():
