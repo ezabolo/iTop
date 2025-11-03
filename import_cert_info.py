@@ -6,6 +6,7 @@ import requests
 import sys
 import logging
 from urllib3.exceptions import InsecureRequestWarning
+from datetime import datetime
 
 # Suppress only the InsecureRequestWarning from urllib3
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
@@ -124,8 +125,10 @@ class iTOPAPI:
         results = {}
         if not name:
             return results
+        # Escape single quotes for OQL
+        safe_name = name.replace("'", "''")
         for machine_class in ['Server', 'VirtualMachine']:
-            oql = f"SELECT {machine_class} WHERE name = '{name}'"
+            oql = f"SELECT {machine_class} WHERE name = '{safe_name}'"
             data = {
                 'operation': 'core/get',
                 'class': machine_class,
@@ -163,11 +166,17 @@ class iTOPAPI:
         if currentcertenddate:
             fields['currentcertenddate'] = currentcertenddate
 
+        # Ensure numeric id when possible
+        try:
+            update_key = int(machine_id)
+        except Exception:
+            update_key = machine_id
+
         data = {
             'operation': 'core/update',
             'comment': 'Updated via automation script',
             'class': machine_class,
-            'key': machine_id,
+            'key': update_key,
             'fields': fields
         }
         
@@ -208,11 +217,43 @@ def process_csv(csv_file, itop_api):
                 logger.error(f"Missing required columns in CSV: {', '.join(missing_cols)}")
                 return 0, 1
                 
+            def normalize_date(val: str):
+                s = (val or '').strip()
+                if not s:
+                    return None
+                # Try common date formats; output YYYY-MM-DD
+                fmts = [
+                    '%Y-%m-%d', '%Y/%m/%d', '%Y.%m.%d',
+                    '%m/%d/%Y', '%m-%d-%Y', '%m.%d.%Y',
+                    '%d/%m/%Y', '%d-%m-%Y', '%d.%m.%Y',
+                    '%m/%d/%y', '%d/%m/%y', '%Y%m%d'
+                ]
+                for fmt in fmts:
+                    try:
+                        dt = datetime.strptime(s, fmt)
+                        return dt.strftime('%Y-%m-%d')
+                    except Exception:
+                        pass
+                # If looks like ISO date-time, try slicing first 10
+                if len(s) >= 10 and s[4] in ('-', '/') and s[7] in ('-', '/'):
+                    try:
+                        dt = datetime.strptime(s[:10].replace('/', '-'), '%Y-%m-%d')
+                        return dt.strftime('%Y-%m-%d')
+                    except Exception:
+                        pass
+                logger.warning(f"Unrecognized date format '{s}', skipping this field")
+                return None
+
             for row_num, row in enumerate(reader, start=2):
                 name = row.get('Name', '').strip()
-                cert_renewal_date = row.get('Cert Renewal  Date', '').strip()
-                current_cert_start = row.get('Current Cert Start Date', '').strip()
-                current_cert_end = row.get('Current Cert End Date', row.get('Current cert End Date', '')).strip()
+                cert_renewal_date_raw = row.get('Cert Renewal  Date', '').strip()
+                current_cert_start_raw = row.get('Current Cert Start Date', '').strip()
+                current_cert_end_raw = (row.get('Current Cert End Date', row.get('Current cert End Date', ''))).strip()
+
+                # Normalize to YYYY-MM-DD where possible
+                cert_renewal_date = normalize_date(cert_renewal_date_raw)
+                current_cert_start = normalize_date(current_cert_start_raw)
+                current_cert_end = normalize_date(current_cert_end_raw)
 
                 if not name:
                     logger.warning(f"Row {row_num}: Name is required - skipping")
@@ -228,6 +269,14 @@ def process_csv(csv_file, itop_api):
                     
                 for machine_id, machine in machines.items():
                     machine_class = machine.get('class_type', 'Server')
+                    # If no cert fields present after normalization, skip update
+                    if not any([cert_renewal_date, current_cert_start, current_cert_end]):
+                        logger.info(f"Row {row_num}: No certificate fields provided for {name} - skipping update")
+                        continue
+                    logger.info(
+                        f"Row {row_num}: Updating {machine_class} id={machine_id} name={name} with "
+                        f"certrenewaldate={cert_renewal_date}, currentstartdate={current_cert_start}, currentcertenddate={current_cert_end}"
+                    )
                     if itop_api.update_machine(
                         machine_id,
                         machine_class,
