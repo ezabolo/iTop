@@ -109,7 +109,7 @@ class iTOPAPI:
             response = self.call_operation(data)
             
             if response and response.get('code') == 0:
-                objects = response.get('objects', {})
+                objects = response.get('objects') or {}
                 # Add the class type to each object for later use
                 for obj_id, obj in objects.items():
                     obj['class_type'] = machine_class
@@ -130,11 +130,11 @@ class iTOPAPI:
                 'operation': 'core/get',
                 'class': machine_class,
                 'key': oql,
-                'output_fields': 'id, name'
+                'output_fields': '*'
             }
             response = self.call_operation(data)
             if response and response.get('code') == 0:
-                objects = response.get('objects', {})
+                objects = response.get('objects') or {}
                 for obj_id, obj in objects.items():
                     obj['class_type'] = machine_class
                     results[obj_id] = obj
