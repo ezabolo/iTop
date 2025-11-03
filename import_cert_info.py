@@ -111,9 +111,13 @@ class iTOPAPI:
             
             if response and response.get('code') == 0:
                 objects = response.get('objects') or {}
-                # Add the class type to each object for later use
+                # Add the class type and capture numeric id from 'key'
                 for obj_id, obj in objects.items():
                     obj['class_type'] = machine_class
+                    try:
+                        obj['numeric_id'] = int(obj.get('key'))
+                    except Exception:
+                        obj['numeric_id'] = obj.get('key')
                     results[obj_id] = obj
             else:
                 msg = response.get('message') if response else 'No response'
@@ -140,6 +144,10 @@ class iTOPAPI:
                 objects = response.get('objects') or {}
                 for obj_id, obj in objects.items():
                     obj['class_type'] = machine_class
+                    try:
+                        obj['numeric_id'] = int(obj.get('key'))
+                    except Exception:
+                        obj['numeric_id'] = obj.get('key')
                     results[obj_id] = obj
         return results
         
@@ -269,16 +277,17 @@ def process_csv(csv_file, itop_api):
                     
                 for machine_id, machine in machines.items():
                     machine_class = machine.get('class_type', 'Server')
+                    update_key = machine.get('numeric_id', machine_id)
                     # If no cert fields present after normalization, skip update
                     if not any([cert_renewal_date, current_cert_start, current_cert_end]):
                         logger.info(f"Row {row_num}: No certificate fields provided for {name} - skipping update")
                         continue
                     logger.info(
-                        f"Row {row_num}: Updating {machine_class} id={machine_id} name={name} with "
+                        f"Row {row_num}: Updating {machine_class} key={update_key} name={name} with "
                         f"certrenewaldate={cert_renewal_date}, currentstartdate={current_cert_start}, currentcertenddate={current_cert_end}"
                     )
                     if itop_api.update_machine(
-                        machine_id,
+                        update_key,
                         machine_class,
                         certrenewaldate=cert_renewal_date,
                         currentstartdate=current_cert_start,
