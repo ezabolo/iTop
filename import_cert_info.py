@@ -278,6 +278,21 @@ def process_csv(csv_file, itop_api):
                 for machine_id, machine in machines.items():
                     machine_class = machine.get('class_type', 'Server')
                     update_key = machine.get('numeric_id', machine_id)
+                    fields_info = machine.get('fields', {}) or {}
+                    # Filter by current status and organization name
+                    current_status = str(fields_info.get('currentstatus', '')).strip().lower()
+                    org_candidates = [
+                        fields_info.get('org_name'),
+                        fields_info.get('organization_name'),
+                        fields_info.get('org_id_friendlyname'),
+                    ]
+                    org_name = next((str(v) for v in org_candidates if v), '')
+                    # Skip if status indicates decommissioned/obsolete or org contains 'DECOM'
+                    if current_status in {'obsolete', 'decommissioned', 'decommissionned'} or 'decom' in org_name.lower():
+                        logger.info(
+                            f"Row {row_num}: Skipping {machine_class} key={update_key} name={name} due to status='{current_status}' or org contains 'DECOM' (org='{org_name}')"
+                        )
+                        continue
                     # If no cert fields present after normalization, skip update
                     if not any([cert_renewal_date, current_cert_start, current_cert_end]):
                         logger.info(f"Row {row_num}: No certificate fields provided for {name} - skipping update")
