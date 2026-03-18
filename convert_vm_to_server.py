@@ -63,6 +63,7 @@ FIELD_BLACKLIST = {
     "friendlyname",
     "finalclass",
     "obsolescence_flag",
+    "obsolescence_date",
     "obsolescense_date",
 }
 
