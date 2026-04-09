@@ -28,13 +28,20 @@ def fetch_cert_info(api: iTOPAPI, class_name: str) -> List[Dict[str, Any]]:
     and 'managementip' or 'ip_address' for Server. We try both and fall back
     to whichever is present in the response.
     """
-    # Ask for both possible IP fields; we'll pick whichever exists per row.
+    # Choose the appropriate IP attribute per class to avoid invalid
+    # attribute errors in output_fields. Servers typically use ip_address;
+    # VirtualMachines use managementip.
+    if class_name == "Server":
+        ip_attr = "ip_address"
+    else:  # VirtualMachine or others
+        ip_attr = "managementip"
+
     oql = f"SELECT {class_name}"
     data = {
         "operation": "core/get",
         "class": class_name,
         "key": oql,
-        "output_fields": "name,managementip,ip_address,certrenewaldate,currentcertstartdate,currentcertenddate",
+        "output_fields": f"name,{ip_attr},certrenewaldate,currentcertstartdate,currentcertenddate",
     }
 
     response = api.call_operation(data)
@@ -49,7 +56,10 @@ def fetch_cert_info(api: iTOPAPI, class_name: str) -> List[Dict[str, Any]]:
     for obj in objects.values():
         fields = obj.get("fields", {})
         name = fields.get("name", "")
-        ip = fields.get("managementip") or fields.get("ip_address") or ""
+        # Use the same attribute we requested above; fall back to empty string
+        # if it is missing for some reason.
+        ip = fields.get("ip_address") if class_name == "Server" else fields.get("managementip")
+        ip = ip or ""
         row = {
             "Name": name,
             "IP": ip,
