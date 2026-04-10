@@ -42,9 +42,17 @@ logger = logging.getLogger(__name__)
 #   notAfter  -> certrenewaldate and currentcertenddate
 REMOTE_CERT_COMMAND = (
     "sh -c '"
+    "host=$(hostname -f 2>/dev/null || hostname); "
+    "short=$(hostname 2>/dev/null || echo); "
+    "cert=$(find /etc/pki/tls/certs -maxdepth 1 -type f "
+    "\\( -iname \"*$host*.crt\" -o -iname \"*$host*.cer\" -o -iname \"*$host*.cert\" "
+    "-o -iname \"*$short*.crt\" -o -iname \"*$short*.cer\" -o -iname \"*$short*.cert\" \\) "
+    "! -iname \"*ca*\" ! -iname \"*localhost*\" -print -quit); "
+    "if [ -z \"$cert\" ]; then "
     "cert=$(find /etc/pki/tls/certs -maxdepth 1 -type f "
     "\\( -iname \"*.crt\" -o -iname \"*.cer\" -o -iname \"*.cert\" \\) "
-    "! -iname \"*ca*\" -print -quit); "
+    "! -iname \"*ca*\" ! -iname \"*localhost*\" -print -quit); "
+    "fi; "
     "[ -z \"$cert\" ] && exit 1; "
     "openssl x509 -in \"$cert\" -noout -startdate -enddate'"
 )
@@ -69,8 +77,9 @@ def run_ssh_command(host: str, user: str, command: str, timeout: int = 15) -> Tu
     try:
         proc = subprocess.run(
             ssh_cmd,
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
             timeout=timeout + 5,
         )
         return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
