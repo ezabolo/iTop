@@ -158,33 +158,33 @@ def _parse_date_flex(value: str) -> Optional[datetime]:
 def compare_cert_info(itop_row: Dict[str, str], remote_info: Dict[str, str]) -> str:
     """Compare iTop cert info row with remote cert info.
 
-    Returns one of:
-      - "yes" if all three fields match exactly (string comparison).
-      - "no"  if any field differs or remote_info is incomplete.
-    """
-    required_keys = ["certrenewaldate", "currentcertstartdate", "currentcertenddate"]
+    Only certrenewaldate is validated:
+      - iTop certrenewaldate vs remote notAfter (mapped to remote certrenewaldate).
 
-    # If we have no remote info or missing fields, treat as mismatch.
-    if not remote_info or any(k not in remote_info or remote_info[k] == "" for k in required_keys):
+    Returns one of:
+      - "yes" if certrenewaldate matches by date.
+      - "no"  otherwise.
+    """
+
+    # Remote info must at least contain a certrenewaldate (mapped from notAfter).
+    remote_raw = (remote_info.get("certrenewaldate") or "").strip() if remote_info else ""
+    if not remote_raw:
         return "no"
 
-    for key in required_keys:
-        itop_raw = (itop_row.get(key) or "").strip()
-        remote_raw = (remote_info.get(key) or "").strip()
+    itop_raw = (itop_row.get("certrenewaldate") or "").strip()
+    if not itop_raw:
+        # No renewal date in iTop => treat as not valid
+        return "no"
 
-        # First try flexible date parsing and compare by date (ignore time if needed).
-        itop_dt = _parse_date_flex(itop_raw)
-        remote_dt = _parse_date_flex(remote_raw)
+    # First try flexible date parsing and compare by date (ignore time if needed).
+    itop_dt = _parse_date_flex(itop_raw)
+    remote_dt = _parse_date_flex(remote_raw)
 
-        if itop_dt and remote_dt:
-            if itop_dt.date() != remote_dt.date():
-                return "no"
-        else:
-            # Fallback to strict string comparison if parsing fails.
-            if itop_raw != remote_raw:
-                return "no"
+    if itop_dt and remote_dt:
+        return "yes" if itop_dt.date() == remote_dt.date() else "no"
 
-    return "yes"
+    # Fallback to strict string comparison if parsing fails.
+    return "yes" if itop_raw == remote_raw else "no"
 
 
 def process_csv(input_csv: str, output_csv: str, ssh_user: str) -> None:
