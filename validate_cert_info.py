@@ -24,14 +24,30 @@ import argparse
 import csv
 import logging
 import subprocess
-from typing import Dict, Tuple
+from datetime import datetime
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Default remote command.
-# You SHOULD adapt this to your environment.
-# It must print: certrenewaldate,currentcertstartdate,currentcertenddate
-REMOTE_CERT_COMMAND = "cat /tmp/itop_cert_info.csv_line"  # placeholder
+# Default remote command for RHEL/Linux hosts.
+#
+# It will:
+# - Search /etc/pki/tls/certs for the first non-CA cert file with extension
+#   .crt, .cer, or .cert (case-insensitive), excluding filenames that contain
+#   "ca" (to avoid CA certs).
+# - Use openssl x509 to print notBefore and notAfter dates.
+#
+# The Python side (parse_remote_cert_info) will interpret this output and map:
+#   notBefore -> currentcertstartdate
+#   notAfter  -> certrenewaldate and currentcertenddate
+REMOTE_CERT_COMMAND = (
+    "sh -c '"
+    "cert=$(find /etc/pki/tls/certs -maxdepth 1 -type f "
+    "\\( -iname \"*.crt\" -o -iname \"*.cer\" -o -iname \"*.cert\" \\) "
+    "! -iname \"*ca*\" -print -quit); "
+    "[ -z \"$cert\" ] && exit 1; "
+    "openssl x509 -in \"$cert\" -noout -startdate -enddate'"
+)
 
 
 def run_ssh_command(host: str, user: str, command: str, timeout: int = 15) -> Tuple[int, str, str]:
@@ -64,10 +80,11 @@ def run_ssh_command(host: str, user: str, command: str, timeout: int = 15) -> Tu
 
 
 def parse_remote_cert_info(output: str) -> Dict[str, str]:
-    """Parse remote command output into a dict of cert fields.
+    """Parse remote openssl output into a dict of cert fields.
 
-    Expected format (single line):
-        certrenewaldate,currentcertstartdate,currentcertenddate
+    Expected format from REMOTE_CERT_COMMAND (openssl x509 -noout -startdate -enddate):
+        notBefore=...
+        notAfter=...
 
     Returns a dict with keys 'certrenewaldate', 'currentcertstartdate', 'currentcertenddate'.
     If parsing fails, returns an empty dict.
@@ -75,17 +92,58 @@ def parse_remote_cert_info(output: str) -> Dict[str, str]:
     if not output:
         return {}
 
-    line = output.splitlines()[0].strip()
-    parts = [p.strip() for p in line.split(",")]
-    if len(parts) != 3:
-        logger.warning("Unexpected remote cert format: %r", line)
+    not_before: Optional[str] = None
+    not_after: Optional[str] = None
+
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("notBefore="):
+            not_before = line.split("=", 1)[1].strip()
+        elif line.startswith("notAfter="):
+            not_after = line.split("=", 1)[1].strip()
+
+    if not_after is None:
+        logger.warning("Unexpected remote cert format (no notAfter): %r", output)
         return {}
 
+    # If notBefore is missing, we still keep going and just duplicate notAfter
+    if not_before is None:
+        not_before = not_after
+
     return {
-        "certrenewaldate": parts[0],
-        "currentcertstartdate": parts[1],
-        "currentcertenddate": parts[2],
+        "certrenewaldate": not_after,
+        "currentcertstartdate": not_before,
+        "currentcertenddate": not_after,
     }
+
+
+def _parse_date_flex(value: str) -> Optional[datetime]:
+    """Try to parse a date string in several common formats.
+
+    Returns a datetime on success or None on failure.
+    """
+    if not value:
+        return None
+
+    value = value.strip()
+    # Common iTop-like and generic datetime formats
+    formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%SZ",
+        # OpenSSL-style: "Jan  1 00:00:00 2025 GMT"
+        "%b %d %H:%M:%S %Y %Z",
+        "%b %d %H:%M:%S %Y",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(value, fmt)
+        except Exception:
+            continue
+
+    return None
 
 
 def compare_cert_info(itop_row: Dict[str, str], remote_info: Dict[str, str]) -> str:
@@ -102,10 +160,20 @@ def compare_cert_info(itop_row: Dict[str, str], remote_info: Dict[str, str]) -> 
         return "no"
 
     for key in required_keys:
-        itop_val = (itop_row.get(key) or "").strip()
-        remote_val = (remote_info.get(key) or "").strip()
-        if itop_val != remote_val:
-            return "no"
+        itop_raw = (itop_row.get(key) or "").strip()
+        remote_raw = (remote_info.get(key) or "").strip()
+
+        # First try flexible date parsing and compare by date (ignore time if needed).
+        itop_dt = _parse_date_flex(itop_raw)
+        remote_dt = _parse_date_flex(remote_raw)
+
+        if itop_dt and remote_dt:
+            if itop_dt.date() != remote_dt.date():
+                return "no"
+        else:
+            # Fallback to strict string comparison if parsing fails.
+            if itop_raw != remote_raw:
+                return "no"
 
     return "yes"
 
