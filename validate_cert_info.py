@@ -32,18 +32,27 @@ logger = logging.getLogger(__name__)
 # Default remote command for RHEL/Linux hosts.
 #
 # It will:
-# - Search /etc/pki/tls/certs for the first non-CA, non-localhost cert file
-#   with extension .crt, .cer, or .cert (case-insensitive).
+# - Get the machine FQDN via `hostname -f`.
+# - Look for a certificate file under /etc/pki/tls/certs named
+#     <fqdn>.cert or <fqdn>.crt (case-insensitive).
 # - Use openssl x509 to print notBefore and notAfter dates.
 #
-# The Python side (parse_remote_cert_info) will interpret this output and map:
-#   notBefore -> currentcertstartdate
-#   notAfter  -> certrenewaldate and currentcertenddate
+# The Python side (parse_remote_cert_info) will interpret this output and map
+# notAfter to iTop's currentcertenddate.
 REMOTE_CERT_COMMAND = (
     "sh -c '"
-    "cert=$(find /etc/pki/tls/certs -maxdepth 1 -type f "
-    "\\( -iname \"*.crt\" -o -iname \"*.cer\" -o -iname \"*.cert\" \\) "
-    "! -iname \"*ca*\" ! -iname \"*localhost*\" -print -quit); "
+    "fqdn=$(hostname -f 2>/dev/null || hostname); "
+    "dir=/etc/pki/tls/certs; "
+    "lower_fqdn=$(printf '%s' \"$fqdn\" | tr 'A-Z' 'a-z'); "
+    "cand1=$dir/$fqdn.crt; "
+    "cand2=$dir/$fqdn.cert; "
+    "cand3=$dir/$lower_fqdn.crt; "
+    "cand4=$dir/$lower_fqdn.cert; "
+    "if [ -f \"$cand1\" ]; then cert=\"$cand1\"; "
+    "elif [ -f \"$cand2\" ]; then cert=\"$cand2\"; "
+    "elif [ -f \"$cand3\" ]; then cert=\"$cand3\"; "
+    "elif [ -f \"$cand4\" ]; then cert=\"$cand4\"; "
+    "else cert=''; fi; "
     "[ -z \"$cert\" ] && exit 1; "
     "openssl x509 -in \"$cert\" -noout -startdate -enddate'"
 )
