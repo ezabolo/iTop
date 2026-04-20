@@ -225,6 +225,9 @@ def process_csv(csv_file, itop_api):
             
             # Validate required columns
             required_cols = ['Name']
+            if reader.fieldnames is None:
+                logger.error("CSV appears to be empty or malformed (no header row)")
+                return 0, 1
             missing_cols = [col for col in required_cols if col not in reader.fieldnames]
             
             if missing_cols:
