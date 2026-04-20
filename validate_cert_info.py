@@ -6,7 +6,9 @@ This script:
 - For each row (machine), uses SSH to connect to the machine by IP.
 - Runs a configurable command on the remote host to print certificate info.
 - Compares the remote certificate info with the values from iTop.
-- Writes a CSV with columns: name,ip,cert_is_valid where cert_is_valid is one of:
+- Writes a CSV with columns: name,ip,certrenewaldate,currentcertstartdate,
+  currentcertenddate,cert_is_valid where the cert_* columns are fetched
+  from the remote machines, and cert_is_valid is one of:
     - "yes"          -> remote cert info matches iTop values
     - "no"           -> remote cert info is reachable but does NOT match iTop
     - "unreachable"  -> SSH failed or required a password
@@ -95,8 +97,9 @@ def parse_remote_cert_info(output: str) -> Dict[str, str]:
         notBefore=...
         notAfter=...
 
-    Returns a dict with keys 'certrenewaldate', 'currentcertstartdate', 'currentcertenddate'.
-    If parsing fails, returns an empty dict.
+    Returns a dict with keys 'certrenewaldate', 'currentcertstartdate',
+    'currentcertenddate' representing the certificate info fetched from
+    the remote machine. If parsing fails, returns an empty dict.
     """
     if not output:
         return {}
@@ -115,10 +118,12 @@ def parse_remote_cert_info(output: str) -> Dict[str, str]:
         logger.warning("Unexpected remote cert format (no notAfter) from remote output: %r", output)
         return {}
 
-    # We only need the certificate end date (notAfter) to compare with
-    # iTop currentcertenddate. We ignore notBefore for now.
+    # Map notBefore/notAfter into the three canonical fields that we
+    # also use in iTop. For now we treat notAfter as both renewal and end.
 
     return {
+        "certrenewaldate": not_after,
+        "currentcertstartdate": not_before or "",
         "currentcertenddate": not_after,
     }
 
@@ -185,12 +190,26 @@ def compare_cert_info(itop_row: Dict[str, str], remote_info: Dict[str, str]) -> 
 
 
 def process_csv(input_csv: str, output_csv: str, ssh_user: str) -> None:
-    """Read export_cert_info CSV, SSH to each host, compare cert info, write results CSV."""
+    """Read export_cert_info CSV, SSH to each host, compare cert info, write results CSV.
+
+    The output CSV columns are:
+      name,ip,certrenewaldate,currentcertstartdate,currentcertenddate,cert_is_valid
+
+    where the cert_* columns are the values fetched from the remote
+    certificate (not from iTop).
+    """
     with open(input_csv, newline="", encoding="utf-8") as f_in, open(
         output_csv, "w", newline="", encoding="utf-8"
     ) as f_out:
         reader = csv.DictReader(f_in)
-        fieldnames = ["name", "ip", "cert_is_valid"]
+        fieldnames = [
+            "name",
+            "ip",
+            "certrenewaldate",
+            "currentcertstartdate",
+            "currentcertenddate",
+            "cert_is_valid",
+        ]
         writer = csv.DictWriter(f_out, fieldnames=fieldnames)
         writer.writeheader()
 
@@ -200,7 +219,16 @@ def process_csv(input_csv: str, output_csv: str, ssh_user: str) -> None:
 
             if not ip:
                 logger.warning("No IP for row %r; marking as unreachable", name)
-                writer.writerow({"name": name, "ip": ip, "cert_is_valid": "unreachable"})
+                writer.writerow(
+                    {
+                        "name": name,
+                        "ip": ip,
+                        "certrenewaldate": "",
+                        "currentcertstartdate": "",
+                        "currentcertenddate": "",
+                        "cert_is_valid": "unreachable",
+                    }
+                )
                 continue
 
             # Skip rows that clearly have no cert info in iTop (all three fields empty).
@@ -209,7 +237,16 @@ def process_csv(input_csv: str, output_csv: str, ssh_user: str) -> None:
                 for k in ("certrenewaldate", "currentcertstartdate", "currentcertenddate")
             ):
                 logger.info("No cert info in iTop for %s (%s); marking as no", name, ip)
-                writer.writerow({"name": name, "ip": ip, "cert_is_valid": "no"})
+                writer.writerow(
+                    {
+                        "name": name,
+                        "ip": ip,
+                        "certrenewaldate": "",
+                        "currentcertstartdate": "",
+                        "currentcertenddate": "",
+                        "cert_is_valid": "no",
+                    }
+                )
                 continue
 
             rc, stdout, stderr = run_ssh_command(ip, ssh_user, REMOTE_CERT_COMMAND)
@@ -219,12 +256,30 @@ def process_csv(input_csv: str, output_csv: str, ssh_user: str) -> None:
                 logger.warning(
                     "SSH to %s (%s) failed (rc=%s): %s", name, ip, rc, stderr or stdout
                 )
-                writer.writerow({"name": name, "ip": ip, "cert_is_valid": "unreachable"})
+                writer.writerow(
+                    {
+                        "name": name,
+                        "ip": ip,
+                        "certrenewaldate": "",
+                        "currentcertstartdate": "",
+                        "currentcertenddate": "",
+                        "cert_is_valid": "unreachable",
+                    }
+                )
                 continue
 
             remote_info = parse_remote_cert_info(stdout)
             status = compare_cert_info(row, remote_info)
-            writer.writerow({"name": name, "ip": ip, "cert_is_valid": status})
+            writer.writerow(
+                {
+                    "name": name,
+                    "ip": ip,
+                    "certrenewaldate": (remote_info.get("certrenewaldate") or "") if remote_info else "",
+                    "currentcertstartdate": (remote_info.get("currentcertstartdate") or "") if remote_info else "",
+                    "currentcertenddate": (remote_info.get("currentcertenddate") or "") if remote_info else "",
+                    "cert_is_valid": status,
+                }
+            )
 
 
 def main() -> None:
