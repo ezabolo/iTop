@@ -66,10 +66,16 @@ class iTOPAPI:
             except Exception:
                 ctype = response.headers.get('Content-Type')
                 preview = (response.text or '')[:500]
-                logger.error(f"Non-JSON response (status {response.stat us_code}, content-type {ctype}) from {endpoint}: {preview}")
+                logger.error(
+                    "Non-JSON response (status %s, content-type %s) from %s: %s",
+                    response.status_code,
+                    ctype,
+                    endpoint,
+                    preview,
+                )
                 return None
         except requests.exceptions.RequestException as e:
-            logger.error(f"API request failed: {e}")
+            logger.error("API request failed: %s", e)
             return None
             
     def search_machine(self, ip=None, fqdn=None):
