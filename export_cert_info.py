@@ -32,24 +32,19 @@ logger = logging.getLogger(__name__)
 def fetch_cert_info(api: iTOPAPI, class_name: str) -> List[Dict[str, Any]]:
     """Fetch cert-related info for all objects of a given class.
 
-    We assume the IP attribute is called 'managementip' for VirtualMachine
-    and 'ip_address' for Server.
+    Different iTop datamodels spell the IP field differently
+    (e.g. managementip, ip_address, ip_adress). To avoid
+    "invalid attribute" errors, we request all fields (*) and
+    then pick the first IP-like attribute that exists per object.
     """
-    # Choose the appropriate IP attribute per class.
-    # NOTE: On your iTop, the Server IP field is spelled 'ip_adress'
-    # (single 'd'), while VirtualMachine uses 'managementip'.
-    if class_name == "Server":
-        ip_attr = "ip_adress"
-    else:  # VirtualMachine or others
-        ip_attr = "managementip"
 
     oql = f"SELECT {class_name}"
     data = {
         "operation": "core/get",
         "class": class_name,
         "key": oql,
-        # Core fields + IP attribute.
-        "output_fields": f"name,{ip_attr},certrenewaldate,currentcertstartdate,currentcertenddate",
+        # Request all fields; we'll pick out what we need.
+        "output_fields": "*",
     }
 
     response = api.call_operation(data)
@@ -65,10 +60,13 @@ def fetch_cert_info(api: iTOPAPI, class_name: str) -> List[Dict[str, Any]]:
         fields = obj.get("fields", {})
         name = fields.get("name", "")
 
-        # Use the same attribute we requested above; fall back to empty string
-        # if it is missing for some reason.
-        ip = fields.get(ip_attr)
-        ip = ip or ""
+        # Try a few common IP attributes; fall back to empty string.
+        ip = ""
+        for candidate in ("managementip", "ip_address", "ip_adress", "ip"):
+            val = fields.get(candidate)
+            if val:
+                ip = val
+                break
 
         certrenewal = (fields.get("certrenewaldate") or "").strip()
         cert_start = (fields.get("currentcertstartdate") or "").strip()
