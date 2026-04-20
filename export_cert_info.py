@@ -1,365 +1,149 @@
 #!/usr/bin/env python3
+"""Export certificate information from iTop into a CSV file.
+
+This script reuses the iTOPAPI client from import_cert_info.py to:
+- Query both Server and VirtualMachine objects.
+- Extract: name, IP address, certrenewaldate, currentcertstartdate, currentcertenddate.
+- Write them to a CSV file with columns:
+    Name,IP,certrenewaldate,currentcertstartdate,currentcertenddate
+
+Run with --help to see options.
+"""
+
 import argparse
 import csv
-import json
-import requests
-import sys
 import logging
-from urllib3.exceptions import InsecureRequestWarning
-from datetime import datetime
+import sys
+from typing import Any, Dict, List
 
-# Suppress only the InsecureRequestWarning from urllib3
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+from import_cert_info import iTOPAPI  # reuse existing API client
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
 logger = logging.getLogger(__name__)
 
-class iTOPAPI:
-    def __init__(self, url, username, password, version="1.3", verify_ssl=True):
-        """
-        Initialize the iTOP API client.
-        
-        Args:
-            url (str): The URL to the iTOP API endpoint (e.g., 'https://itop.example.com/webservices/rest.php')
-            username (str): iTOP username
-            password (str): iTOP password
-            version (str): iTOP API version (default: '1.3')
-            verify_ssl (bool): Whether to verify SSL certificate
-        """
-        self.url = url.rstrip('/')
-        self.username = username
-        self.password = password
-        self.version = version
-        self.verify_ssl = verify_ssl
-        
-    def call_operation(self, payload):
-        """Post a payload to iTop REST (form-encoded json_data with Basic Auth)."""
-        try:
-            headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-            # Normalize endpoint: ensure we hit /webservices/rest.php
-            base = self.url
-            if not base.lower().endswith('rest.php'):
-                base = base.rstrip('/') + '/webservices/rest.php'
-            endpoint = base if ('?version=' in base or '&version=' in base) else f"{base}?version={self.version}"
-            response = requests.post(
-                endpoint,
-                auth=(self.username, self.password),
-                headers=headers,
-                data={
-                    'auth_user': self.username,
-                    'auth_pwd': self.password,
-                    'json_data': json.dumps(payload),
-                },
-                verify=self.verify_ssl,
-                timeout=60,
-            )
-            # Try JSON first; if HTML or other, log a concise preview
-            try:
-                return response.json()
-            except Exception:
-                ctype = response.headers.get('Content-Type')
-                preview = (response.text or '')[:500]
-                logger.error(
-                    "Non-JSON response (status %s, content-type %s) from %s: %s",
-                    response.status_code,
-                    ctype,
-                    endpoint,
-                    preview,
-                )
-                return None
-        except requests.exceptions.RequestException as e:
-            logger.error("API request failed: %s", e)
-            return None
-            
-    def search_machine(self, ip=None, fqdn=None):
-        """
-        Search for a machine by IP address or FQDN.
-        Searches both Server and VirtualMachine types.
-        
-        Args:
-            ip (str, optional): IP address to search for
-            fqdn (str, optional): FQDN to search for
-            
-        Returns:
-            dict: Dictionary of matching machine objects with their class type
-        """
-        if not ip and not fqdn:
-            logger.error("Either IP or FQDN must be provided")
-            return {}
-        
-        results = {}
-        
-        # Search for both Server and VirtualMachine types
-        for machine_class in ['Server', 'VirtualMachine']:
-            # Prepare the OQL query based on provided parameters
-            if ip and fqdn:
-                oql = f"SELECT {machine_class} WHERE ip_address = '{ip}' OR fqdn = '{fqdn}'"
-            elif ip:
-                oql = f"SELECT {machine_class} WHERE ip_address = '{ip}'"
-            else:  # fqdn only
-                oql = f"SELECT {machine_class} WHERE fqdn = '{fqdn}'"
-                
-            data = {
-                'operation': 'core/get',
-                'class': machine_class,
-                'key': oql,
-                'output_fields': 'id, friendlyname, ip_address, fqdn, owner_name, project_name'
-            }
-                
-            response = self.call_operation(data)
-            
-            if response and response.get('code') == 0:
-                objects = response.get('objects') or {}
-                # Add the class type and capture numeric id from 'key'
-                for obj_id, obj in objects.items():
-                    obj['class_type'] = machine_class
-                    try:
-                        obj['numeric_id'] = int(obj.get('key'))
-                    except Exception:
-                        obj['numeric_id'] = obj.get('key')
-                    results[obj_id] = obj
-            else:
-                msg = response.get('message') if response else 'No response'
-                logger.warning(f"Failed to search {machine_class}: {msg}")
-                
+
+def fetch_cert_info(api: iTOPAPI, class_name: str) -> List[Dict[str, Any]]:
+    """Fetch cert-related info for all objects of a given class.
+
+    We assume the IP attribute is called 'managementip' for VirtualMachine
+    and 'managementip' or 'ip_address' for Server. We try both and fall back
+    to whichever is present in the response.
+    """
+    # Choose the appropriate IP attribute per class to avoid invalid
+    # attribute errors in output_fields. Servers typically use ip_address;
+    # VirtualMachines use managementip.
+    if class_name == "Server":
+        ip_attr = "ip_address"
+    else:  # VirtualMachine or others
+        ip_attr = "managementip"
+
+    oql = f"SELECT {class_name}"
+    data = {
+        "operation": "core/get",
+        "class": class_name,
+        "key": oql,
+        # We only request the core cert-related fields plus the IP attribute.
+        "output_fields": f"name,{ip_attr},certrenewaldate,currentcertstartdate,currentcertenddate",
+    }
+
+    response = api.call_operation(data)
+    results: List[Dict[str, Any]] = []
+
+    if not response or response.get("code") != 0:
+        msg = response.get("message") if response else "No response"
+        logger.error("Failed to fetch %s objects: %s", class_name, msg)
         return results
 
-    def search_by_name(self, name):
-        results = {}
-        if not name:
-            return results
-        # Escape single quotes for OQL
-        safe_name = name.replace("'", "''")
-        for machine_class in ['Server', 'VirtualMachine']:
-            oql = f"SELECT {machine_class} WHERE name = '{safe_name}'"
-            data = {
-                'operation': 'core/get',
-                'class': machine_class,
-                'key': oql,
-                'output_fields': '*'
-            }
-            response = self.call_operation(data)
-            if response and response.get('code') == 0:
-                objects = response.get('objects') or {}
-                for obj_id, obj in objects.items():
-                    obj['class_type'] = machine_class
-                    try:
-                        obj['numeric_id'] = int(obj.get('key'))
-                    except Exception:
-                        obj['numeric_id'] = obj.get('key')
-                    results[obj_id] = obj
-        return results
-        
-    def update_machine(self, machine_id, machine_class, certrenewaldate=None, currentcertstartdate=None, currentcertenddate=None):
-        """
-        Update the owner and project of a machine.
-        
-        Args:
-            machine_id (str): The ID of the machine to update
-            machine_class (str): The class of the machine ('Server' or 'VirtualMachine')
-            owner (str): The new owner value
-            project (str): The new project value
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        fields = {}
+    objects = response.get("objects") or {}
+    for obj in objects.values():
+        fields = obj.get("fields", {})
+        name = fields.get("name", "")
+        # Use the same attribute we requested above; fall back to empty string
+        # if it is missing for some reason.
+        ip = fields.get("ip_address") if class_name == "Server" else fields.get("managementip")
+        ip = ip or ""
 
-        # Add optional certificate-related fields if provided
-        if certrenewaldate:
-            fields['certrenewaldate'] = certrenewaldate
-        if currentcertstartdate:
-            fields['currentcertstartdate'] = currentcertstartdate
-        if currentcertenddate:
-            fields['currentcertenddate'] = currentcertenddate
+        certrenewal = (fields.get("certrenewaldate") or "").strip()
+        cert_start = (fields.get("currentcertstartdate") or "").strip()
+        cert_end = (fields.get("currentcertenddate") or "").strip()
 
-        # Ensure numeric id when possible
-        try:
-            update_key = int(machine_id)
-        except Exception:
-            update_key = machine_id
+        # Filter 1: skip machines with no cert info at all in iTop.
+        if not (certrenewal or cert_start or cert_end):
+            continue
 
-        data = {
-            'operation': 'core/update',
-            'comment': 'Updated via automation script',
-            'class': machine_class,
-            'key': update_key,
-            'fields': fields
+        # Filter 2: skip decommissioned machines (IP 1.1.1.1).
+        if ip == "1.1.1.1":
+            continue
+
+        row = {
+            "Name": name,
+            "IP": ip,
+            "certrenewaldate": certrenewal,
+            "currentcertstartdate": cert_start,
+            "currentcertenddate": cert_end,
         }
-        
-        response = self.call_operation(data)
-        
-        if not response or response.get('code') != 0:
-            logger.error(f"Failed to update {machine_class} {machine_id}: {response.get('message') if response else 'No response'}")
-            return False
-            
-        logger.info(f"Successfully updated {machine_class} {machine_id}")
-        return True
+        results.append(row)
 
-def process_csv(csv_file, itop_api):
-    """
-    Process the CSV file and update machines in iTOP.
-    
-    Args:
-        csv_file (str): Path to the CSV file
-        itop_api (iTOPAPI): Instance of the iTOP API client
-        
-    Returns:
-        tuple: (success_count, error_count)
-    """
-    success_count = 0
-    error_count = 0
-    
-    logger.info(f"Processing CSV file: {csv_file}")
-    
-    try:
-        with open(csv_file, 'r', newline='') as f:
-            reader = csv.DictReader(f)
-            
-            # Validate required columns
-            required_cols = ['Name']
-            if reader.fieldnames is None:
-                logger.error("CSV appears to be empty or malformed (no header row)")
-                return 0, 1
-            missing_cols = [col for col in required_cols if col not in reader.fieldnames]
-            
-            if missing_cols:
-                logger.error(f"Missing required columns in CSV: {', '.join(missing_cols)}")
-                return 0, 1
-                
-            def normalize_date(val: str):
-                s = (val or '').strip()
-                if not s:
-                    return None
-                # Try common date formats; output YYYY-MM-DD
-                fmts = [
-                    '%Y-%m-%d', '%Y/%m/%d', '%Y.%m.%d',
-                    '%m/%d/%Y', '%m-%d-%Y', '%m.%d.%Y',
-                    '%d/%m/%Y', '%d-%m-%Y', '%d.%m.%Y',
-                    '%m/%d/%y', '%d/%m/%y', '%Y%m%d'
-                ]
-                for fmt in fmts:
-                    try:
-                        dt = datetime.strptime(s, fmt)
-                        return dt.strftime('%Y-%m-%d')
-                    except Exception:
-                        pass
-                # If looks like ISO date-time, try slicing first 10
-                if len(s) >= 10 and s[4] in ('-', '/') and s[7] in ('-', '/'):
-                    try:
-                        dt = datetime.strptime(s[:10].replace('/', '-'), '%Y-%m-%d')
-                        return dt.strftime('%Y-%m-%d')
-                    except Exception:
-                        pass
-                logger.warning(f"Unrecognized date format '{s}', skipping this field")
-                return None
+    logger.info("Fetched %d %s objects", len(results), class_name)
+    return results
 
-            for row_num, row in enumerate(reader, start=2):
-                name = row.get('Name', '').strip()
 
-                # Support both the original manual CSV headers and the
-                # export_cert_info.py headers so that all_machines_cert_info.csv
-                # can be used directly as input.
-                cert_renewal_date_raw = (
-                    row.get('Cert Renewal  Date')
-                    or row.get('certrenewaldate')
-                    or ''
-                ).strip()
-                current_cert_start_raw = (
-                    row.get('Current Cert Start Date')
-                    or row.get('currentcertstartdate')
-                    or ''
-                ).strip()
-                current_cert_end_raw = (
-                    row.get('Current Cert End Date')
-                    or row.get('Current cert End Date')
-                    or row.get('currentcertenddate')
-                    or ''
-                ).strip()
+def write_csv(path: str, rows: List[Dict[str, Any]]) -> None:
+    fieldnames = [
+        "Name",
+        "IP",
+        "certrenewaldate",
+        "currentcertstartdate",
+        "currentcertenddate",
+    ]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
-                # Normalize to YYYY-MM-DD where possible
-                cert_renewal_date = normalize_date(cert_renewal_date_raw)
-                current_cert_start = normalize_date(current_cert_start_raw)
-                current_cert_end = normalize_date(current_cert_end_raw)
 
-                if not name:
-                    logger.warning(f"Row {row_num}: Name is required - skipping")
-                    error_count += 1
-                    continue
-
-                machines = itop_api.search_by_name(name)
-                
-                if not machines:
-                    logger.warning(f"Row {row_num}: No machines found with Name={name}")
-                    error_count += 1
-                    continue
-                    
-                for machine_id, machine in machines.items():
-                    machine_class = machine.get('class_type', 'Server')
-                    update_key = machine.get('numeric_id', machine_id)
-                    fields_info = machine.get('fields', {}) or {}
-                    # If no cert fields present after normalization, skip update
-                    if not any([cert_renewal_date, current_cert_start, current_cert_end]):
-                        logger.info(f"Row {row_num}: No certificate fields provided for {name} - skipping update")
-                        continue
-                    logger.info(
-                        f"Row {row_num}: Updating {machine_class} key={update_key} name={name} with "
-                        f"certrenewaldate={cert_renewal_date}, currentcertstartdate={current_cert_start}, currentcertenddate={current_cert_end}"
-                    )
-                    if itop_api.update_machine(
-                        update_key,
-                        machine_class,
-                        certrenewaldate=cert_renewal_date,
-                        currentcertstartdate=current_cert_start,
-                        currentcertenddate=current_cert_end
-                    ):
-                        success_count += 1
-                    else:
-                        error_count += 1
-                        
-    except FileNotFoundError:
-        logger.error(f"CSV file not found: {csv_file}")
-        return 0, 1
-    except Exception as e:
-        logger.error(f"Error processing CSV: {e}")
-        return success_count, error_count + 1
-        
-    return success_count, error_count
-
-def main():
-    parser = argparse.ArgumentParser(description='Update machine owners and projects in iTOP based on a CSV file')
-    parser.add_argument('csv_file', help='Path to the CSV file containing machine information')
-    parser.add_argument('--url', required=True, help='iTOP API URL (e.g., https://itop.example.com/webservices/rest.php)')
-    parser.add_argument('--username', required=True, help='iTOP username')
-    parser.add_argument('--password', required=True, help='iTOP password')
-    parser.add_argument('--no-verify', action='store_true', help='Disable SSL certificate verification')
-    
-    args = parser.parse_args()
-    
-    # Initialize the iTOP API client
-    itop_api = iTOPAPI(
-        url=args.url,
-        username=args.username,
-        password=args.password,
-        verify_ssl=not args.no_verify
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Export cert info from iTop to CSV.")
+    parser.add_argument("--url", required=True, help="iTop base URL (same as used by import_cert_info.py)")
+    parser.add_argument("--user", required=True, help="iTop username")
+    parser.add_argument("--password", required=True, help="iTop password")
+    parser.add_argument(
+        "--verify-ssl",
+        action="store_true",
+        help="Verify SSL certificates (default: disabled)",
     )
-    
-    # Process the CSV file
-    success_count, error_count = process_csv(args.csv_file, itop_api)
-    
-    logger.info(f"Completed: {success_count} successful updates, {error_count} errors")
-    
-    # Return a non-zero exit code if there were any errors
-    if error_count > 0:
-        return 1
-    return 0
+    parser.add_argument(
+        "--output",
+        default="cert_export.csv",
+        help="Output CSV file path (default: %(default)s)",
+    )
+    return parser.parse_args()
 
-if __name__ == '__main__':
-    sys.exit(main())
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+    args = parse_args()
+
+    api = iTOPAPI(
+        url=args.url,
+        username=args.user,
+        password=args.password,
+        version="1.3",
+        verify_ssl=args.verify_ssl,
+    )
+
+    all_rows: List[Dict[str, Any]] = []
+    for cls in ("Server", "VirtualMachine"):
+        all_rows.extend(fetch_cert_info(api, cls))
+
+    write_csv(args.output, all_rows)
+    logger.info("Wrote %d rows to %s", len(all_rows), args.output)
+
+
+if __name__ == "__main__":
+    main()
