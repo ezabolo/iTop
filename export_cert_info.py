@@ -36,8 +36,10 @@ def fetch_cert_info(api: iTOPAPI, class_name: str) -> List[Dict[str, Any]]:
     and 'ip_address' for Server.
     """
     # Choose the appropriate IP attribute per class.
+    # NOTE: On your iTop, the Server IP field is spelled 'ip_adress'
+    # (single 'd'), while VirtualMachine uses 'managementip'.
     if class_name == "Server":
-        ip_attr = "ip_address"
+        ip_attr = "ip_adress"
     else:  # VirtualMachine or others
         ip_attr = "managementip"
 
@@ -65,7 +67,7 @@ def fetch_cert_info(api: iTOPAPI, class_name: str) -> List[Dict[str, Any]]:
 
         # Use the same attribute we requested above; fall back to empty string
         # if it is missing for some reason.
-        ip = fields.get("ip_address") if class_name == "Server" else fields.get("managementip")
+        ip = fields.get(ip_attr)
         ip = ip or ""
 
         certrenewal = (fields.get("certrenewaldate") or "").strip()
