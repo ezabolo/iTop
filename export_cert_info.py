@@ -263,9 +263,26 @@ def process_csv(csv_file, itop_api):
 
             for row_num, row in enumerate(reader, start=2):
                 name = row.get('Name', '').strip()
-                cert_renewal_date_raw = row.get('Cert Renewal  Date', '').strip()
-                current_cert_start_raw = row.get('Current Cert Start Date', '').strip()
-                current_cert_end_raw = (row.get('Current Cert End Date', row.get('Current cert End Date', ''))).strip()
+
+                # Support both the original manual CSV headers and the
+                # export_cert_info.py headers so that all_machines_cert_info.csv
+                # can be used directly as input.
+                cert_renewal_date_raw = (
+                    row.get('Cert Renewal  Date')
+                    or row.get('certrenewaldate')
+                    or ''
+                ).strip()
+                current_cert_start_raw = (
+                    row.get('Current Cert Start Date')
+                    or row.get('currentcertstartdate')
+                    or ''
+                ).strip()
+                current_cert_end_raw = (
+                    row.get('Current Cert End Date')
+                    or row.get('Current cert End Date')
+                    or row.get('currentcertenddate')
+                    or ''
+                ).strip()
 
                 # Normalize to YYYY-MM-DD where possible
                 cert_renewal_date = normalize_date(cert_renewal_date_raw)
