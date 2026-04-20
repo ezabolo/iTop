@@ -4,10 +4,18 @@
 This script reuses the iTOPAPI client from import_cert_info.py to:
 - Query both Server and VirtualMachine objects.
 - Extract: name, IP address, certrenewaldate, currentcertstartdate, currentcertenddate.
-- Write them to a CSV file with columns:
+- Optionally filter out machines without any cert info or with a specific IP.
+
+The output CSV columns are:
     Name,IP,certrenewaldate,currentcertstartdate,currentcertenddate
 
-Run with --help to see options.
+Usage example:
+
+    python3 export_cert_info.py \
+        --url "https://your-itop-server/webservices/rest.php" \
+        --user your_itop_username \
+        --password your_itop_password \
+        --output all_machines_cert_info.csv
 """
 
 import argparse
@@ -25,12 +33,9 @@ def fetch_cert_info(api: iTOPAPI, class_name: str) -> List[Dict[str, Any]]:
     """Fetch cert-related info for all objects of a given class.
 
     We assume the IP attribute is called 'managementip' for VirtualMachine
-    and 'managementip' or 'ip_address' for Server. We try both and fall back
-    to whichever is present in the response.
+    and 'ip_address' for Server.
     """
-    # Choose the appropriate IP attribute per class to avoid invalid
-    # attribute errors in output_fields. Servers typically use ip_address;
-    # VirtualMachines use managementip.
+    # Choose the appropriate IP attribute per class.
     if class_name == "Server":
         ip_attr = "ip_address"
     else:  # VirtualMachine or others
@@ -41,7 +46,7 @@ def fetch_cert_info(api: iTOPAPI, class_name: str) -> List[Dict[str, Any]]:
         "operation": "core/get",
         "class": class_name,
         "key": oql,
-        # We only request the core cert-related fields plus the IP attribute.
+        # Core fields + IP attribute.
         "output_fields": f"name,{ip_attr},certrenewaldate,currentcertstartdate,currentcertenddate",
     }
 
@@ -57,6 +62,7 @@ def fetch_cert_info(api: iTOPAPI, class_name: str) -> List[Dict[str, Any]]:
     for obj in objects.values():
         fields = obj.get("fields", {})
         name = fields.get("name", "")
+
         # Use the same attribute we requested above; fall back to empty string
         # if it is missing for some reason.
         ip = fields.get("ip_address") if class_name == "Server" else fields.get("managementip")
@@ -147,3 +153,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
